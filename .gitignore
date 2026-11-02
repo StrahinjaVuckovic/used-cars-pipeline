@@ -1,0 +1,6 @@
+data/
+*.csv
+.ipynb_checkpoints/
+__pycache__/
+.env
+*Zone.Identifier

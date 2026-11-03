@@ -4,3 +4,6 @@ data/
 __pycache__/
 .env
 *Zone.Identifier
+*.parquet
+*.avro
+FourthSourceSystem*

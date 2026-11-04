@@ -29,6 +29,10 @@ INGESTION_DATE = dbutils.widgets.get("ingestion_date").strip()
 DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
 DEV_SAMPLE_ROWS = 5000
 
+# Each cleaned source has ~200 partitions after deduplication (shuffle), so the union has ~800 and would be
+# written as ~800 files of ~1 MB. The full table is ~800 MB, so 4 files of ~200 MB each is a good size.
+OUTPUT_FILES = 4
+
 TABLE_NAME = "vehicle_listings_dev" if DEV_MODE else "vehicle_listings"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
@@ -259,7 +263,7 @@ print(f"vehicle_listings: {actual_rows} rows, checks passed ({unparsed_dates} un
 
 # COMMAND ----------
 
-write_delta_table(vehicle_listings_df, TARGET_PATH)
+write_delta_table(vehicle_listings_df, TARGET_PATH, num_files=OUTPUT_FILES)
 
 for cleaned_df in cleaned_sources.values():
     cleaned_df.unpersist()

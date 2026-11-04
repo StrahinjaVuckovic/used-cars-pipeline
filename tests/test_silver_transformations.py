@@ -210,6 +210,25 @@ def test_write_and_read_delta_table_by_path(spark, utils, tmp_path, catalog_unto
     assert (tmp_path / "t" / "_delta_log").is_dir()
 
 
+def parquet_files_in_current_version(spark, path: str) -> int:
+    """Number of data files in the latest Delta version (old versions' files are ignored)."""
+    return spark.sql(f"DESCRIBE DETAIL delta.`{path}`").first().numFiles
+
+
+def test_write_delta_table_with_num_files_controls_file_count(spark, utils, tmp_path):
+    path = str(tmp_path / "t")
+    many_partitions = spark.range(1000).repartition(50)
+    utils["write_delta_table"](many_partitions, path, num_files=3)
+    assert parquet_files_in_current_version(spark, path) == 3
+    assert utils["read_delta_table"](path).count() == 1000
+
+
+def test_write_delta_table_without_num_files_keeps_partitioning(spark, utils, tmp_path):
+    path = str(tmp_path / "t")
+    utils["write_delta_table"](spark.range(1000).repartition(5), path)
+    assert parquet_files_in_current_version(spark, path) == 5
+
+
 def test_delta_table_exists_is_false_for_plain_parquet_folder(spark, utils, tmp_path):
     path = str(tmp_path / "plain")
     spark.range(2).write.parquet(path)

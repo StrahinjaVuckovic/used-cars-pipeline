@@ -285,6 +285,8 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
         "First": SAMPLE_ROWS, "Second": SAMPLE_ROWS, "Third": SAMPLE_ROWS, "Fourth": SAMPLE_ROWS,
     }
     assert (silver_dir / "vehicle_listings" / "_delta_log").is_dir()
+    detail = spark.sql(f"DESCRIBE DETAIL delta.`{silver_dir / 'vehicle_listings'}`").first()
+    assert detail.numFiles == namespace["OUTPUT_FILES"]  # no small-files problem
 
     currencies = {
         r.source_system: r.currencies

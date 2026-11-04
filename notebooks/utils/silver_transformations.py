@@ -225,8 +225,16 @@ def dq_issue_counts(df: DataFrame) -> DataFrame:
 #   SQL:    SELECT * FROM delta.`abfss://silver@<account>.dfs.core.windows.net/<table>`
 
 
-def write_delta_table(df: DataFrame, path: str) -> None:
-    """Overwrite the Delta table stored at `path` (schema changes are allowed)."""
+def write_delta_table(df: DataFrame, path: str, num_files: int = None) -> None:
+    """
+    Overwrite the Delta table stored at `path` (schema changes are allowed).
+
+    Spark writes one file per DataFrame partition. When the DataFrame has many small partitions
+    (for example after unioning several shuffled sources), pass `num_files` to repartition it first,
+    so the table consists of a few files of reasonable size instead of hundreds of tiny ones.
+    """
+    if num_files:
+        df = df.repartition(num_files)
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
 
 

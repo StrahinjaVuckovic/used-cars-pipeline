@@ -26,6 +26,9 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources) and
 - **No partitioning.** Both tables are far below the size where partitioning helps (Databricks guidance:
   tables of ~1 TB or more, with partitions of at least ~1 GB). Partitioning by `year(service_date)`
   would also produce fake partitions from invalid dates (1900, 2101) and a null partition.
+- **Controlled file count.** `vehicle_listings` is repartitioned to 4 files (~200 MB each) before writing.
+  Without it, the union of four deduplicated sources (~200 shuffle partitions each) was written as ~800 files of ~1 MB
+  (the "small files problem", which slows down reads). `service_events` is written as ~14 files of ~54 MB without extra steps.
 
 ## Storage and catalog
 

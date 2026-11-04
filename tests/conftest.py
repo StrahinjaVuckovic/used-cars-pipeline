@@ -113,12 +113,19 @@ def silver_dir(tmp_path) -> Path:
     return path
 
 
+def catalog_database_names(spark) -> set:
+    return {database.name for database in spark.catalog.listDatabases()}
+
+
 @pytest.fixture()
-def clean_metastore(spark):
-    """Drop the silver database so each notebook run registers its tables at its own location."""
-    spark.sql("DROP DATABASE IF EXISTS silver CASCADE")
+def catalog_untouched(spark):
+    """
+    Fail if the test created catalog objects. On Databricks the workspace uses Unity Catalog without an
+    External Location for the storage containers, so the notebooks must write path-based Delta tables only.
+    """
+    before = catalog_database_names(spark)
     yield
-    spark.sql("DROP DATABASE IF EXISTS silver CASCADE")
+    assert catalog_database_names(spark) == before, "Notebook created a database in the catalog"
 
 
 def write_service_book_partition(bronze_root: Path, csv_text: str) -> Path:

@@ -230,7 +230,7 @@ def test_real_sample_per_source(spark, nb, bronze_sample, source_system):
 # ---------- full notebook run ----------
 
 
-def test_full_notebook_run(spark, bronze_sample, silver_dir, clean_metastore):
+def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
     namespace = load_config_and_utils(
         spark,
         bronze_path=str(bronze_sample),
@@ -239,7 +239,7 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, clean_metastore):
     )
     run_notebook(NOTEBOOK, namespace)  # the notebook's own asserts run here
 
-    table = spark.table("silver.vehicle_listings")
+    table = spark.read.format("delta").load(str(silver_dir / "vehicle_listings"))
     assert table.count() == 4 * SAMPLE_ROWS
     assert {r.source_system: r["count"] for r in table.groupBy("source_system").count().collect()} == {
         "First": SAMPLE_ROWS, "Second": SAMPLE_ROWS, "Third": SAMPLE_ROWS, "Fourth": SAMPLE_ROWS,
@@ -254,7 +254,7 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, clean_metastore):
     assert len(namespace["display"].results) >= 5  # every report cell ran without errors
 
 
-def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, clean_metastore):
+def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
     """An impossible date in Bronze must not stop the notebook: the row is written and flagged (option b)."""
     bronze = tmp_path / "bronze"
     shutil.copytree(bronze_sample, bronze)
@@ -276,7 +276,7 @@ def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, t
     )
     run_notebook(NOTEBOOK, namespace)
 
-    table = spark.table("silver.vehicle_listings")
+    table = spark.read.format("delta").load(str(tmp_path / "silver" / "vehicle_listings"))
     assert table.count() == 4 * SAMPLE_ROWS
     row = table.filter(F.col("vehicle_id") == bad_vehicle_id).first()
     assert row.posting_date is None and row.posting_date_raw == "02/30/2021"
@@ -284,7 +284,7 @@ def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, t
     assert namespace["unparsed_dates"] == 1
 
 
-def test_dev_mode_writes_to_dev_table(spark, bronze_sample, silver_dir, clean_metastore):
+def test_dev_mode_writes_to_dev_table(spark, bronze_sample, silver_dir, catalog_untouched):
     namespace = load_config_and_utils(
         spark,
         bronze_path=str(bronze_sample),
@@ -292,5 +292,5 @@ def test_dev_mode_writes_to_dev_table(spark, bronze_sample, silver_dir, clean_me
         widget_values={"ingestion_date": "latest", "dev_mode": "true"},
     )
     run_notebook(NOTEBOOK, namespace)
-    assert spark.catalog.tableExists("silver.vehicle_listings_dev")
-    assert not spark.catalog.tableExists("silver.vehicle_listings")
+    assert (silver_dir / "vehicle_listings_dev" / "_delta_log").is_dir()
+    assert not (silver_dir / "vehicle_listings").exists()

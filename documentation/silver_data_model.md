@@ -27,6 +27,23 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources) and
   tables of ~1 TB or more, with partitions of at least ~1 GB). Partitioning by `year(service_date)`
   would also produce fake partitions from invalid dates (1900, 2101) and a null partition.
 
+## Storage and catalog
+
+- Tables are **path-based Delta tables** in the `silver` container:
+  `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings` and `.../service_events`
+  (`*_dev` suffix when a notebook runs with `dev_mode=true`).
+- They are **not registered in the catalog**. The Databricks workspace uses Unity Catalog (catalog
+  `dbw_used_cars_strahinja`), and registering a table on an `abfss://` path requires a Unity Catalog
+  *External Location* (backed by a *Storage Credential*), which only an admin can create. Without it,
+  `CREATE TABLE ... LOCATION` fails with `NO_PARENT_EXTERNAL_LOCATION_FOR_PATH`.
+- Managed Unity Catalog tables were rejected because their data would not live in the project's `silver` container.
+- How to read the tables:
+  - Python: `spark.read.format("delta").load("abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings")`
+  - SQL: ``SELECT * FROM delta.`abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings` ``
+- Once an External Location exists for the `silver` and `gold` containers, the tables can be registered
+  (`CREATE TABLE ... LOCATION`) without moving any data.
+- The names `silver.vehicle_listings` / `silver.service_events` in this document are logical names.
+
 ## Load strategy and assumptions
 
 - **Assumption: every Bronze ingestion is a full snapshot.** The ADF pipeline `pl_ingest_bronze_sources`

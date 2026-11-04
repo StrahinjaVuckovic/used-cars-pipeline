@@ -217,8 +217,35 @@ def dq_issue_counts(df: DataFrame) -> DataFrame:
     )
 
 
-def write_delta_table(df: DataFrame, path: str, database: str, table_name: str) -> None:
-    """Overwrite a Delta table at `path` and register it in the metastore."""
+# Silver tables are path-based Delta tables (not registered in the catalog).
+# The workspace uses Unity Catalog, where registering a table on an abfss:// path requires an
+# External Location created by an admin. Until that exists, tables are written and read by path:
+#   Python: spark.read.format("delta").load(path)
+#   SQL:    SELECT * FROM delta.`abfss://silver@<account>.dfs.core.windows.net/<table>`
+
+
+def write_delta_table(df: DataFrame, path: str) -> None:
+    """Overwrite the Delta table stored at `path` (schema changes are allowed)."""
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
-    spark.sql(f"CREATE TABLE IF NOT EXISTS {database}.{table_name} USING DELTA LOCATION '{path}'")
+
+
+def read_delta_table(path: str) -> DataFrame:
+    """Read the Delta table stored at `path`."""
+    return spark.read.format("delta").load(path)
+
+
+def delta_table_exists(path: str) -> bool:
+    """
+    True if a Delta table is stored at `path`.
+
+    Implemented with a plain read instead of DeltaTable.isDeltaTable: the read only works with the public
+    DataFrame API, so it behaves the same on every cluster type. Loading resolves the table schema
+    immediately, so a missing path or a non-Delta folder raises AnalysisException here.
+    """
+    from pyspark.errors import AnalysisException
+
+    try:
+        spark.read.format("delta").load(path)
+        return True
+    except AnalysisException:
+        return False

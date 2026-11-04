@@ -3,7 +3,8 @@
 # MAGIC # 02 – Silver: vehicle_listings
 # MAGIC
 # MAGIC Reads the four vehicle listing sources from one Bronze ingestion partition, cleans and standardizes
-# MAGIC each of them, combines them into one dataset and overwrites the Delta table `silver.vehicle_listings`.
+# MAGIC each of them, combines them into one dataset and overwrites the Delta table stored at
+# MAGIC `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings` (path-based, see 00_config).
 # MAGIC
 # MAGIC Data model and rules: `documentation/silver_data_model.md`.
 # MAGIC
@@ -31,7 +32,7 @@ DEV_SAMPLE_ROWS = 5000
 TABLE_NAME = "vehicle_listings_dev" if DEV_MODE else "vehicle_listings"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={SILVER_DATABASE}.{TABLE_NAME}")
+print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -245,13 +246,13 @@ print(f"vehicle_listings: {actual_rows} rows, checks passed ({unparsed_dates} un
 
 # COMMAND ----------
 
-write_delta_table(vehicle_listings_df, TARGET_PATH, SILVER_DATABASE, TABLE_NAME)
+write_delta_table(vehicle_listings_df, TARGET_PATH)
 
 for cleaned_df in cleaned_sources.values():
     cleaned_df.unpersist()
 
-silver_df = spark.table(f"{SILVER_DATABASE}.{TABLE_NAME}")
-print(f"Written {silver_df.count()} rows to {SILVER_DATABASE}.{TABLE_NAME} ({TARGET_PATH})")
+silver_df = read_delta_table(TARGET_PATH)
+print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 

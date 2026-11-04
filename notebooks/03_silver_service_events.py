@@ -3,7 +3,8 @@
 # MAGIC # 03 – Silver: service_events
 # MAGIC
 # MAGIC Reads ServiceBook from one Bronze ingestion partition, cleans and standardizes it and overwrites
-# MAGIC the Delta table `silver.service_events`. This table is the basis for the Reliability Score in Gold.
+# MAGIC the Delta table stored at `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/service_events`
+# MAGIC (path-based, see 00_config). This table is the basis for the Reliability Score in Gold.
 # MAGIC
 # MAGIC Data model and rules: `documentation/silver_data_model.md`.
 # MAGIC
@@ -31,7 +32,7 @@ DEV_SAMPLE_ROWS = 50000
 TABLE_NAME = "service_events_dev" if DEV_MODE else "service_events"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={SILVER_DATABASE}.{TABLE_NAME}")
+print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -212,11 +213,11 @@ if unparsed_dates > 0:
 
 # COMMAND ----------
 
-write_delta_table(service_events_df, TARGET_PATH, SILVER_DATABASE, TABLE_NAME)
+write_delta_table(service_events_df, TARGET_PATH)
 raw_df.unpersist()
 
-silver_df = spark.table(f"{SILVER_DATABASE}.{TABLE_NAME}")
-print(f"Written {silver_df.count()} rows to {SILVER_DATABASE}.{TABLE_NAME} ({TARGET_PATH})")
+silver_df = read_delta_table(TARGET_PATH)
+print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -247,12 +248,12 @@ display(silver_df.groupBy("event_type", "service_type", "severity").count().orde
 # COMMAND ----------
 
 # Coverage: how many service-book vehicles exist in silver.vehicle_listings (relationship is not enforced).
-listings_table = f"{SILVER_DATABASE}.vehicle_listings_dev" if DEV_MODE else f"{SILVER_DATABASE}.vehicle_listings"
-if spark.catalog.tableExists(listings_table):
+listings_path = f"{SILVER_PATH}/{'vehicle_listings_dev' if DEV_MODE else 'vehicle_listings'}"
+if delta_table_exists(listings_path):
     service_vehicles = silver_df.select("vehicle_id").distinct()
-    listing_vehicles = spark.table(listings_table).select("vehicle_id").distinct()
+    listing_vehicles = read_delta_table(listings_path).select("vehicle_id").distinct()
     matched = service_vehicles.join(listing_vehicles, "vehicle_id", "inner").count()
     total = service_vehicles.count()
-    print(f"{matched} of {total} service-book vehicles ({100 * matched / max(total, 1):.2f}%) exist in {listings_table}")
+    print(f"{matched} of {total} service-book vehicles ({100 * matched / max(total, 1):.2f}%) exist in {listings_path}")
 else:
-    print(f"{listings_table} does not exist yet – run 02_silver_vehicle_listings first to see coverage.")
+    print(f"No Delta table at {listings_path} yet – run 02_silver_vehicle_listings first to see coverage.")

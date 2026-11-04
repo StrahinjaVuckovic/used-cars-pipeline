@@ -177,9 +177,24 @@ def test_read_bronze_files_rejects_unknown_format(utils):
         utils["read_bronze_files"]("/tmp/whatever", "xml")
 
 
-def test_write_delta_table_overwrites_and_registers(spark, utils, tmp_path, clean_metastore):
+def test_write_and_read_delta_table_by_path(spark, utils, tmp_path, catalog_untouched):
     path = str(tmp_path / "t")
-    utils["write_delta_table"](spark.range(5), path, "silver", "t")
-    utils["write_delta_table"](spark.range(3), path, "silver", "t")  # second run overwrites
-    assert spark.table("silver.t").count() == 3
-    assert spark.read.format("delta").load(path).count() == 3
+    assert utils["delta_table_exists"](path) is False
+    utils["write_delta_table"](spark.range(5), path)
+    utils["write_delta_table"](spark.range(3), path)  # second run overwrites
+    assert utils["delta_table_exists"](path) is True
+    assert utils["read_delta_table"](path).count() == 3
+    assert (tmp_path / "t" / "_delta_log").is_dir()
+
+
+def test_delta_table_exists_is_false_for_plain_parquet_folder(spark, utils, tmp_path):
+    path = str(tmp_path / "plain")
+    spark.range(2).write.parquet(path)
+    assert utils["delta_table_exists"](path) is False
+
+
+def test_write_delta_table_allows_schema_change(spark, utils, tmp_path):
+    path = str(tmp_path / "t")
+    utils["write_delta_table"](spark.range(2), path)
+    utils["write_delta_table"](spark.range(2).withColumn("extra", F.lit("x")), path)
+    assert utils["read_delta_table"](path).columns == ["id", "extra"]

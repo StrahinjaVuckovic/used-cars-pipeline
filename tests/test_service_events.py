@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from conftest import SAMPLE_ROWS, write_service_book_partition
+from conftest import SAMPLE_ROWS, catalog_database_names, write_service_book_partition
 from notebook_utils import load_config_and_utils, run_notebook
 
 NOTEBOOK = "03_silver_service_events.py"
@@ -53,7 +53,7 @@ EDGE_CASE_ROWS = [
 
 
 def run_service_events_notebook(spark, bronze_path, silver_path):
-    spark.sql("DROP DATABASE IF EXISTS silver CASCADE")
+    databases_before = catalog_database_names(spark)
     namespace = load_config_and_utils(
         spark,
         bronze_path=str(bronze_path),
@@ -61,7 +61,8 @@ def run_service_events_notebook(spark, bronze_path, silver_path):
         widget_values={"ingestion_date": "latest", "dev_mode": "false"},
     )
     run_notebook(NOTEBOOK, namespace)  # the notebook's own asserts run here
-    result = spark.table("silver.service_events").cache()
+    assert catalog_database_names(spark) == databases_before, "Notebook created a database in the catalog"
+    result = spark.read.format("delta").load(f"{silver_path}/service_events").cache()
     result.count()
     return namespace, result
 
@@ -71,8 +72,7 @@ def edge_case_result(spark, tmp_path_factory):
     bronze = tmp_path_factory.mktemp("bronze-edge")
     write_service_book_partition(bronze, "\n".join([HEADER, *EDGE_CASE_ROWS]) + "\n")
     namespace, result = run_service_events_notebook(spark, bronze, tmp_path_factory.mktemp("silver-edge"))
-    yield namespace, result
-    spark.sql("DROP DATABASE IF EXISTS silver CASCADE")
+    return namespace, result
 
 
 def rows_of(result, vehicle_id):
@@ -171,13 +171,20 @@ def test_service_event_id_is_stable_across_runs(spark, edge_case_result, tmp_pat
 
 def test_real_sample(spark, bronze_sample, tmp_path):
     namespace, result = run_service_events_notebook(spark, bronze_sample, tmp_path / "silver")
-    try:
-        assert dict(result.dtypes) == EXPECTED_DTYPES
-        assert result.count() <= SAMPLE_ROWS
-        assert result.filter("service_date IS NULL AND NOT array_contains(dq_issues, 'invalid_service_date')").count() == 0
-        assert set(r.event_type for r in result.select("event_type").distinct().collect()) <= {
-            "MAINTENANCE", "INSPECTION", "REPAIR", "UNKNOWN",
-        }
-        assert len(namespace["display"].results) >= 4
-    finally:
-        spark.sql("DROP DATABASE IF EXISTS silver CASCADE")
+    assert dict(result.dtypes) == EXPECTED_DTYPES
+    assert result.count() <= SAMPLE_ROWS
+    assert result.filter("service_date IS NULL AND NOT array_contains(dq_issues, 'invalid_service_date')").count() == 0
+    assert set(r.event_type for r in result.select("event_type").distinct().collect()) <= {
+        "MAINTENANCE", "INSPECTION", "REPAIR", "UNKNOWN",
+    }
+    assert len(namespace["display"].results) >= 4
+
+
+def test_coverage_against_vehicle_listings(spark, tmp_path, capsys):
+    """When a vehicle_listings Delta table exists at the Silver path, the notebook reports the match percentage."""
+    silver = tmp_path / "silver"
+    spark.createDataFrame([("c1",), ("c2",)], "vehicle_id STRING").write.format("delta").save(str(silver / "vehicle_listings"))
+    bronze = tmp_path / "bronze"
+    write_service_book_partition(bronze, "\n".join([HEADER, *EDGE_CASE_ROWS]) + "\n")
+    run_service_events_notebook(spark, bronze, silver)
+    assert "2 of 5 service-book vehicles (40.00%) exist in" in capsys.readouterr().out

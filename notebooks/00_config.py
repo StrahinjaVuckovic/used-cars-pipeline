@@ -18,7 +18,8 @@ BRONZE_PATH = f"abfss://bronze@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 SILVER_PATH = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 GOLD_PATH = f"abfss://gold@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 
-SILVER_DATABASE = "silver"
+# Tables are path-based Delta tables under these containers (no catalog registration yet:
+# the workspace uses Unity Catalog and has no External Location for these containers).
 
 # COMMAND ----------
 

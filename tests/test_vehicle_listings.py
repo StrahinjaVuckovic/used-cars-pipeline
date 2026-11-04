@@ -4,6 +4,7 @@ import csv
 import datetime
 import shutil
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from pyspark.sql import functions as F
@@ -12,6 +13,44 @@ from conftest import INGESTION_DATE, SAMPLE_ROWS
 from notebook_utils import load_config_and_utils, run_notebook, run_notebook_cells_until
 
 NOTEBOOK = "02_silver_vehicle_listings.py"
+
+
+def first_csv_path(bronze: Path) -> Path:
+    return bronze / "FirstSourceSystem" / f"ingestion_date={INGESTION_DATE}" / "FirstSourceSystem.csv"
+
+
+def copy_bronze_and_edit_first_row(bronze_sample: Path, tmp_path: Path, edit) -> Path:
+    """
+    Copy the Bronze sample and change the first data row of FirstSourceSystem.csv with `edit(row, header)`.
+    The csv module (newline="") keeps quoted values, including bare \\r characters, intact; rows are written
+    back with Windows line endings like the real file.
+    """
+    bronze = tmp_path / "bronze"
+    shutil.copytree(bronze_sample, bronze)
+    path = first_csv_path(bronze)
+    with path.open(encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    edit(rows[1], rows[0])
+    with path.open("w", encoding="utf-8", newline="") as f:
+        csv.writer(f, lineterminator="\r\n").writerows(rows)
+    return bronze
+
+
+def first_row_value(bronze: Path, column: str) -> str:
+    with first_csv_path(bronze).open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        return next(reader)[header.index(column)]
+
+
+def run_listings_notebook(spark, bronze: Path, silver: Path, dev_mode: str = "false") -> dict:
+    namespace = load_config_and_utils(
+        spark,
+        bronze_path=str(bronze),
+        silver_path=str(silver),
+        widget_values={"ingestion_date": "latest", "dev_mode": dev_mode},
+    )
+    return run_notebook(NOTEBOOK, namespace)
 
 EXPECTED_DTYPES = {
     "vehicle_id": "string", "source_system": "string", "source_system_uuid": "string",
@@ -216,7 +255,8 @@ def test_missing_bronze_column_fails(spark, nb):
 def test_real_sample_per_source(spark, nb, bronze_sample, source_system):
     source = nb["VEHICLE_SOURCES"][source_system]
     path = str(bronze_sample / source["folder"] / f"ingestion_date={INGESTION_DATE}")
-    df = nb["clean_vehicle_listings"](nb["read_bronze_files"](path, source["format"]), source_system, INGESTION_DATE)
+    raw_df = nb["read_bronze_files"](path, source["format"], source.get("options"))
+    df = nb["clean_vehicle_listings"](raw_df, source_system, INGESTION_DATE)
 
     assert df.count() == SAMPLE_ROWS
     assert dict(df.dtypes) == EXPECTED_DTYPES
@@ -256,17 +296,10 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
 
 def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
     """An impossible date in Bronze must not stop the notebook: the row is written and flagged (option b)."""
-    bronze = tmp_path / "bronze"
-    shutil.copytree(bronze_sample, bronze)
-    first_csv = bronze / "FirstSourceSystem" / f"ingestion_date={INGESTION_DATE}" / "FirstSourceSystem.csv"
-    lines = first_csv.read_text(encoding="utf-8").splitlines()
-    header = lines[0].split(",")
-    # Rewrite one row through the csv module so quoted fields stay intact.
-    rows = list(csv.reader(lines))
-    rows[1][header.index("posting_date")] = "02/30/2021"
-    bad_vehicle_id = rows[1][header.index("id")]
-    with first_csv.open("w", encoding="utf-8", newline="") as f:
-        csv.writer(f).writerows(rows)
+    bronze = copy_bronze_and_edit_first_row(
+        bronze_sample, tmp_path, lambda row, header: row.__setitem__(header.index("posting_date"), "02/30/2021")
+    )
+    bad_vehicle_id = first_row_value(bronze, "id")
 
     namespace = load_config_and_utils(
         spark,
@@ -294,3 +327,39 @@ def test_dev_mode_writes_to_dev_table(spark, bronze_sample, silver_dir, catalog_
     run_notebook(NOTEBOOK, namespace)
     assert (silver_dir / "vehicle_listings_dev" / "_delta_log").is_dir()
     assert not (silver_dir / "vehicle_listings").exists()
+
+
+def test_bare_carriage_return_in_description_does_not_split_rows(spark, bronze_sample, tmp_path, catalog_untouched):
+    """Regression test for the cluster run where FirstSourceSystem got 1,186 extra rows."""
+    description = "Line one\rLine two\rLine three"
+    bronze = copy_bronze_and_edit_first_row(
+        bronze_sample, tmp_path, lambda row, header: row.__setitem__(header.index("description"), description)
+    )
+    vehicle_id = first_row_value(bronze, "id")
+
+    run_listings_notebook(spark, bronze, tmp_path / "silver")
+
+    table = spark.read.format("delta").load(str(tmp_path / "silver" / "vehicle_listings"))
+    assert table.filter("source_system = 'First'").count() == SAMPLE_ROWS
+    assert table.filter(F.col("vehicle_id") == vehicle_id).first().description == description
+
+
+def test_malformed_vehicle_id_stops_the_notebook(spark, bronze_sample, tmp_path, catalog_untouched):
+    """A vehicle_id that is not 12 hex characters means a wrong parse: the notebook must stop before writing."""
+    bronze = copy_bronze_and_edit_first_row(
+        bronze_sample, tmp_path, lambda row, header: row.__setitem__(header.index("id"), "broken text")
+    )
+    with pytest.raises(AssertionError, match="not 12 hex characters"):
+        run_listings_notebook(spark, bronze, tmp_path / "silver")
+    assert not (tmp_path / "silver" / "vehicle_listings").exists()
+
+
+def test_bronze_sample_matches_real_first_source_format():
+    """The sample copy keeps Windows line endings, like the real file."""
+    import itertools
+    from notebook_utils import DATA_DIR
+    if not DATA_DIR.exists():
+        pytest.skip("data/ folder with the source files is not available")
+    with (DATA_DIR / "FirstSourceSystem.csv").open("rb") as f:
+        first_line = next(itertools.islice(f, 1))
+    assert first_line.endswith(b"\r\n")

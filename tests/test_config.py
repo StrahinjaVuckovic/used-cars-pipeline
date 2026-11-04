@@ -38,6 +38,16 @@ def test_fourth_source_uses_real_bronze_folder_name(config):
     assert config["VEHICLE_SOURCES"]["Fourth"] == {"folder": "FourthSource", "format": "json"}
 
 
+def test_first_source_is_read_with_multiline(config):
+    """FirstSourceSystem.csv has bare \\r characters inside quoted descriptions."""
+    assert config["VEHICLE_SOURCES"]["First"]["options"] == {"multiLine": "true"}
+
+
+def test_service_book_is_read_without_multiline(config):
+    """ServiceBook has \\r only in line endings; multiLine would make the 1.2 GB read single-threaded."""
+    assert "options" not in config["SERVICE_BOOK_SOURCE"]
+
+
 @pytest.fixture()
 def bronze_with_partitions(tmp_path):
     for partition in ["ingestion_date=2026-11-01", "ingestion_date=2026-11-03", "ingestion_date=2026-11-02"]:

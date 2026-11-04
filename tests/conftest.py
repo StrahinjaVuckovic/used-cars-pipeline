@@ -53,8 +53,12 @@ def _require_data_dir():
 
 
 def _copy_first_lines(source: Path, target: Path, line_count: int) -> None:
+    """
+    Copy the first `line_count` records byte for byte. Binary mode splits only on "\\n", so a bare "\\r"
+    inside a quoted value (present in FirstSourceSystem.csv) stays inside its record, as in the real file.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
-    with source.open(encoding="utf-8") as src, target.open("w", encoding="utf-8") as dst:
+    with source.open("rb") as src, target.open("wb") as dst:
         dst.writelines(itertools.islice(src, line_count))
 
 

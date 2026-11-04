@@ -91,6 +91,8 @@ MAX_PRICE = 1_000_000
 MIN_MANUFACTURE_YEAR = 1900
 MAX_ODOMETER = 1_000_000
 VIN_PATTERN = r"^[A-HJ-NPR-Z0-9]{17}$"
+# Every real listing id is 12 lower-case hex characters. Anything else means the row was parsed wrongly.
+VEHICLE_ID_PATTERN = r"^[0-9a-f]{12}$"
 STATE_PATTERN = r"^[A-Z]{2}$"
 
 # Final column order of silver.vehicle_listings (must match the documentation).
@@ -189,7 +191,7 @@ source_row_counts = []
 
 for source_system, source in VEHICLE_SOURCES.items():
     partition_path, partition_date = get_ingestion_path(source["folder"], INGESTION_DATE)
-    raw_df = read_bronze_files(partition_path, source["format"])
+    raw_df = read_bronze_files(partition_path, source["format"], source.get("options"))
     if DEV_MODE:
         raw_df = raw_df.limit(DEV_SAMPLE_ROWS)
 
@@ -224,6 +226,17 @@ assert actual_rows == expected_rows, f"Union row count {actual_rows} != sum of s
 # If this fails, the key must become (source_system, vehicle_id) – see documentation.
 assert_unique(vehicle_listings_df, ["vehicle_id"], "vehicle_listings")
 assert_columns(vehicle_listings_df, VEHICLE_LISTINGS_COLUMNS, "vehicle_listings")
+
+# Structural check: a vehicle_id that is not 12 hex characters means a source file was read wrongly
+# (for example a CSV row split in two). This is a reading error, not a data-quality issue, so it stops the run.
+malformed_ids_df = vehicle_listings_df.filter(~F.coalesce(F.col("vehicle_id").rlike(VEHICLE_ID_PATTERN), F.lit(False)))
+malformed_ids = malformed_ids_df.count()
+if malformed_ids > 0:
+    display(malformed_ids_df.groupBy("source_system").count())
+    display(malformed_ids_df.select("source_system", "vehicle_id", "listing_url").limit(20))
+assert malformed_ids == 0, (
+    f"{malformed_ids} rows have a vehicle_id that is not 12 hex characters – a source file was parsed wrongly"
+)
 
 # Unparsed dates do not stop the pipeline: the rows are kept and flagged (Silver rule).
 # A warning with examples makes a new date format or bad source values visible.

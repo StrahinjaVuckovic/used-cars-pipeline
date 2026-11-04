@@ -29,15 +29,16 @@ NULL_TOKENS = ["", "null", "none", "nan", "n/a"]
 # COMMAND ----------
 
 
-def read_bronze_files(path: str, file_format: str) -> DataFrame:
+def read_bronze_files(path: str, file_format: str, options: dict = None) -> DataFrame:
     """
     Read one Bronze partition folder and add the `source_file_path` lineage column.
 
     No schema inference: CSV columns are read as strings and cast explicitly later.
-    CSV files are read without multiLine because the sources contain no embedded line breaks,
-    which keeps the read parallel.
+    `options` are extra reader options per source. CSV files are read without multiLine by default
+    (keeps the read parallel); a source whose quoted values contain line breaks or bare carriage
+    returns must pass {"multiLine": "true"}.
     """
-    reader = spark.read
+    reader = spark.read.options(**(options or {}))
     if file_format == "csv":
         df = (
             reader.option("header", True)

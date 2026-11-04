@@ -152,24 +152,47 @@ def test_null_percentages_and_issue_counts(spark, utils):
 
 
 @pytest.mark.parametrize(
-    "folder, file_format",
+    "folder, file_format, options",
     [
-        ("FirstSourceSystem", "csv"),
-        ("SecondSourceSystem", "parquet"),
-        ("ThirdSourceSystem", "avro"),
-        ("FourthSource", "json"),
-        ("ServiceBook", "csv"),
+        ("FirstSourceSystem", "csv", {"multiLine": "true"}),
+        ("SecondSourceSystem", "parquet", None),
+        ("ThirdSourceSystem", "avro", None),
+        ("FourthSource", "json", None),
+        ("ServiceBook", "csv", None),
     ],
 )
-def test_read_bronze_files_all_formats(utils, bronze_sample, folder, file_format):
+def test_read_bronze_files_all_formats(utils, bronze_sample, folder, file_format, options):
     path = str(bronze_sample / folder / f"ingestion_date={INGESTION_DATE}")
-    df = utils["read_bronze_files"](path, file_format)
+    df = utils["read_bronze_files"](path, file_format, options)
     assert df.count() == 1000
     assert "source_file_path" in df.columns
     assert df.filter(F.col("source_file_path").isNull()).count() == 0
     if file_format == "csv":
         # No schema inference: every source column arrives as a string.
         assert {t for c, t in df.dtypes if c != "source_file_path"} == {"string"}
+
+
+CSV_WITH_BARE_CARRIAGE_RETURN = (
+    b"id,description,price\r\n"
+    b'aaaaaaaaaaaa,"line one\rline two",100.0\r\n'
+    b"bbbbbbbbbbbb,plain,200.0\r\n"
+)
+
+
+def test_csv_with_bare_carriage_return_breaks_without_multiline(utils, tmp_path):
+    """Documents the bug found on the cluster: without multiLine a bare \\r inside quotes splits the row."""
+    (tmp_path / "data.csv").write_bytes(CSV_WITH_BARE_CARRIAGE_RETURN)
+    df = utils["read_bronze_files"](str(tmp_path), "csv")
+    assert df.count() != 2
+
+
+def test_csv_with_bare_carriage_return_is_read_correctly_with_multiline(utils, tmp_path):
+    (tmp_path / "data.csv").write_bytes(CSV_WITH_BARE_CARRIAGE_RETURN)
+    df = utils["read_bronze_files"](str(tmp_path), "csv", {"multiLine": "true"})
+    rows = {r.id: r for r in df.collect()}
+    assert set(rows) == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert rows["aaaaaaaaaaaa"].description == "line one\rline two"
+    assert rows["bbbbbbbbbbbb"].price == "200.0"  # last column has no trailing \r
 
 
 def test_read_bronze_files_rejects_unknown_format(utils):

@@ -48,10 +48,12 @@ configure_adls_oauth(STORAGE_ACCOUNT, SECRET_SCOPE)
 
 # COMMAND ----------
 
-# Vehicle listing sources: logical name -> Bronze folder and file format.
+# Vehicle listing sources: logical name -> Bronze folder, file format and optional reader options.
 # Note: the fourth source lives in the Bronze folder "FourthSource" (file has no extension, content is NDJSON).
+# FirstSourceSystem.csv has bare carriage returns ("\r") inside quoted `description` values. Without
+# multiLine, Spark treats every "\r" as a line end and splits those rows into broken extra rows.
 VEHICLE_SOURCES = {
-    "First": {"folder": "FirstSourceSystem", "format": "csv"},
+    "First": {"folder": "FirstSourceSystem", "format": "csv", "options": {"multiLine": "true"}},
     "Second": {"folder": "SecondSourceSystem", "format": "parquet"},
     "Third": {"folder": "ThirdSourceSystem", "format": "avro"},
     "Fourth": {"folder": "FourthSource", "format": "json"},

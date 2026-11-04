@@ -81,8 +81,14 @@ Findings that shaped the model:
 - ServiceBook: `root_cause`, `warranty_flag` and `is_tyre` have a single value in all rows.
   `service_date` ranges from 1900 to 2101. 117 duplicate events.
   `km_since_prev` is negative exactly when `odometer_monotonic_flag = 0`.
-- No CSV field contains embedded line breaks, so the CSV files are read without `multiLine`,
-  which keeps reading parallel.
+- Both CSV files use Windows line endings (`\r\n`). `FirstSourceSystem.csv` also has 5,277 bare carriage
+  returns (`\r`) inside quoted `description` values (2,558 rows). Spark treats a bare `\r` as a line end, so
+  without `multiLine` those rows are split into broken rows (seen on the cluster as 108,156 instead of
+  106,970 rows). First is therefore read with `multiLine=true`. `ServiceBook.csv` has `\r` only in its
+  line endings and is read without `multiLine`, which keeps the 1.2 GB read parallel.
+- Every listing `id` and ServiceBook `car_id` is exactly 12 lower-case hex characters. Notebook 02 uses
+  this as a **structural check**: a `vehicle_id` with any other shape means a file was parsed wrongly, and
+  the run stops before writing.
 
 ## Entity-relationship diagram
 

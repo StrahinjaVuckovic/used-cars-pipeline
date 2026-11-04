@@ -7,3 +7,5 @@ __pycache__/
 *.parquet
 *.avro
 FourthSourceSystem*
+.venv/
+.pytest_cache/

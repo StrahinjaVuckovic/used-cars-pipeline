@@ -62,6 +62,10 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources) and
 
 ## Source profiling summary (ingestion 2026-11-03)
 
+The full, reproducible profiles are Databricks notebooks in `notebooks/profiling/` (read-only, not part of the
+daily pipeline): `01_profile_vehicle_sources` (widget `source` = one source or `all`),
+`02_profile_service_book` and `03_profile_brand_lookup`. Each ends with a "Findings → decisions" table.
+
 | Source | Format | Rows | Currency | Notes |
 |---|---|---|---|---|
 | FirstSourceSystem | CSV | 106,970 | GBP / USD / AUD / EUR (by platform) | empty values are `""` |

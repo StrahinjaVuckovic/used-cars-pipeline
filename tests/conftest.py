@@ -92,6 +92,11 @@ def bronze_sample(spark, tmp_path_factory) -> Path:
         SAMPLE_ROWS + 1,
     )
 
+    # The lookup is small and static (no date partition): copy the whole file.
+    lookup = bronze / "Lookup"
+    lookup.mkdir(parents=True)
+    shutil.copyfile(DATA_DIR / "model_to_brand_lookup.csv", lookup / "model_to_brand_lookup.csv")
+
     # Binary formats: let Spark write a small sample in the same format.
     for folder, file_name, file_format in [
         ("SecondSourceSystem", "SecondSourceSystem.parquet", "parquet"),

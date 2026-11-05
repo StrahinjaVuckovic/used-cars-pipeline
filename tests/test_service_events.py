@@ -49,6 +49,10 @@ EDGE_CASE_ROWS = [
     "c4,2013-01-01,30000.0,UNKNOWN,,MEDIUM,UNKNOWN,False,0,0,0,0,0,,,,1,,0.0,,,Engine Work,,engine work",
     # impossible calendar date: must be flagged, not stop the notebook
     "c5,2012-02-30,40000.0,MAINTENANCE,OIL/OIL_FILTER,LOW,UNKNOWN,False,1,0,0,0,1,15000.0,,,1,,0.0,,,Oil Change,,oil change",
+    # two real repairs on the same day (same car/date/odometer/event type, different cost and odometer chain),
+    # the pattern found 117 times in the real ServiceBook: both must be kept
+    "c6,2015-06-01,44473.0,REPAIR,,HIGH,UNKNOWN,False,0,1,0,0,0,,41925.0,2548.0,1,,0.0,1065.80,8.0,repair,,repair",
+    "c6,2015-06-01,44473.0,REPAIR,,HIGH,UNKNOWN,False,0,1,0,0,0,,44473.0,0.0,1,,0.0,1525.59,4.0,repair,,repair",
 ]
 
 
@@ -97,6 +101,13 @@ def test_exact_duplicates_removed_and_rows_kept(edge_case_result):
     assert result.select("service_event_id").distinct().count() == result.count()
 
 
+def test_two_repairs_on_the_same_day_are_both_kept(edge_case_result):
+    _, result = edge_case_result
+    rows = result.filter("vehicle_id = 'c6'").collect()
+    assert sorted(str(r.cost_eur) for r in rows) == ["1065.80", "1525.59"]
+    assert len({r.service_event_id for r in rows}) == 2
+
+
 def test_different_service_type_is_a_different_event(edge_case_result):
     _, result = edge_case_result
     assert [r.service_type for r in rows_of(result, "c4")] == ["BODY_WORK", "ENGINE_WORK"]
@@ -124,7 +135,7 @@ def test_skipped_service(edge_case_result):
 
 def test_repair_cost_and_downtime(edge_case_result):
     _, result = edge_case_result
-    row = result.filter("event_type = 'REPAIR'").first()
+    row = result.filter("event_type = 'REPAIR' AND vehicle_id = 'c2'").first()
     assert row.cost_eur == Decimal("1234.56") and row.downtime_days == 5
     assert row.severity == "HIGH" and row.is_repair is True
 
@@ -187,4 +198,4 @@ def test_coverage_against_vehicle_listings(spark, tmp_path, capsys):
     bronze = tmp_path / "bronze"
     write_service_book_partition(bronze, "\n".join([HEADER, *EDGE_CASE_ROWS]) + "\n")
     run_service_events_notebook(spark, bronze, silver)
-    assert "2 of 5 service-book vehicles (40.00%) exist in" in capsys.readouterr().out
+    assert "2 of 6 service-book vehicles (33.33%) exist in" in capsys.readouterr().out

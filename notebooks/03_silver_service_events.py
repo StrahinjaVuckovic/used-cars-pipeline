@@ -114,11 +114,13 @@ for column_name, distinct_count in distinct_counts.items():
 
 # COMMAND ----------
 
-# Surrogate key from the raw values, so it stays stable even when validation nulls a value.
-key_parts = ["car_id", "service_date", "odometer_km", "event_type", "service_type_raw"]
+# Surrogate key from ALL raw business columns, so it stays stable even when validation nulls a value.
+# Profiling showed 117 pairs of REPAIR events with the same car, date, odometer and event type that differ in
+# cost_eur, downtime_days and prev_odometer_km: they are two real repairs on the same day, not duplicates.
+# Hashing every column keeps both; only rows that are identical in every column share a key.
 df = raw_df.withColumn(
     "service_event_id",
-    F.sha2(F.concat_ws("||", *[F.coalesce(F.col(c), F.lit("")) for c in key_parts]), 256),
+    F.sha2(F.concat_ws("||", *[F.coalesce(F.col(c), F.lit("")) for c in RAW_SERVICE_COLUMNS]), 256),
 )
 
 df = df.drop(*CONSTANT_COLUMNS, *DERIVED_COLUMNS)
@@ -180,7 +182,7 @@ df = try_cast_columns(
 df = collect_dq_issues(df)
 df = add_lineage_columns(df, partition_date)
 
-# Exact duplicate events share the same key; keep one.
+# Only rows that are identical in every source column share a key; keep one of them.
 df = df.dropDuplicates(["service_event_id"])
 
 service_events_df = df.select(*SERVICE_EVENTS_COLUMNS)

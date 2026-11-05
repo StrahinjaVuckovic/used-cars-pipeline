@@ -54,7 +54,11 @@ print(f"{path}: {total_rows:,} rows, {vehicles:,} vehicles, {len(df.columns)} co
 
 # COMMAND ----------
 
-# MAGIC %md ## Column profile, line breaks and constant columns
+# MAGIC %md
+# MAGIC ## Column profile, line breaks and constant columns
+# MAGIC
+# MAGIC All CSV columns are strings, so min/max in the column profile are alphabetical (`odometer_km` max shows
+# MAGIC `999997.0`); the real numeric ranges are in the numeric summary below. The distinct count is an estimate.
 
 # COMMAND ----------
 
@@ -190,6 +194,21 @@ display(df.join(duplicate_keys.select(*EVENT_KEY), EVENT_KEY).groupBy("event_typ
 
 # COMMAND ----------
 
+# Are the rows that share EVENT_KEY really duplicates? Count, per column, how many key groups have
+# different values in it. Different cost/downtime/odometer chain = different events, which must be kept.
+duplicate_rows = df.join(duplicate_keys.select(*EVENT_KEY), EVENT_KEY)
+other_columns = [c for c in df.columns if c not in EVENT_KEY]
+differs = duplicate_rows.groupBy(*EVENT_KEY).agg(
+    *[(F.countDistinct(F.coalesce(F.col(c), F.lit("<null>"))) > 1).cast("int").alias(c) for c in other_columns]
+)
+differing_groups = differs.agg(*[F.sum(c).alias(c) for c in other_columns]).first().asDict()
+display(spark.createDataFrame(
+    [(c, differing_groups[c]) for c in other_columns if differing_groups[c]],
+    "column STRING, key_groups_with_different_values LONG",
+))
+
+# COMMAND ----------
+
 # desc_all looks like lower(service_type_raw + " " + notes_raw). If that holds for every row, it can be
 # derived at any time and does not have to be stored in Silver.
 expected_desc = F.lower(F.concat_ws(" ", F.col("service_type_raw"), F.col("notes_raw")))
@@ -231,11 +250,13 @@ raw_df.unpersist()
 # MAGIC
 # MAGIC | Finding | Decision |
 # MAGIC |---|---|
-# MAGIC | 8,312,490 rows, 419,641 vehicles, `car_id` = 12 hex characters, every vehicle exists in the listings | `vehicle_id` (renamed `car_id`) links to `vehicle_listings`; ~8,239 listings have no service history → their Reliability Score is unknown (null), not 100 |
+# MAGIC | 8,312,490 rows, 419,641 vehicles, `car_id` = 12 hex characters, every vehicle exists in the listings | `vehicle_id` (renamed `car_id`) links to `vehicle_listings`; 8,239 listings have no service history → their Reliability Score is unknown (null), not 100 |
 # MAGIC | `root_cause`, `warranty_flag`, `is_tyre` have a single value | Dropped in Silver (re-checked on every run) |
-# MAGIC | `desc_all` = lower(`service_type_raw` + `notes_raw`) | Dropped, can be derived |
-# MAGIC | `service_date` is ISO, but ranges from 1900 to 2101 | `try_cast` to date; before 1950 or in the future → null + `invalid_service_date` |
-# MAGIC | `km_since_prev < 0` exactly where `odometer_monotonic_flag = 0` (1,346,300 rows) | Flag `non_monotonic_odometer`, values kept |
-# MAGIC | 117 duplicates on (`car_id`, `service_date`, `odometer_km`, `event_type`), all REPAIR | Surrogate key `service_event_id`, duplicates removed |
-# MAGIC | `cost_eur` and `downtime_days` filled only for some event types | Kept as nullable columns; no defaults in Silver |
-# MAGIC | MAINTENANCE ~92%, INSPECTION ~6%, REPAIR ~1%; ENGINE_WORK is labelled INSPECTION / LOW | Reliability Score must look at `service_type_raw` / notes, not only `event_type` |
+# MAGIC | `desc_all` = lower(`service_type_raw` + " " + `notes_raw`) in every row | Dropped, can be derived |
+# MAGIC | `maintenance_kind` (OIL/OIL_FILTER) and `interval_km_target` (15000) are filled only for Oil Change rows (7.76% null = all other rows) | Kept, but they only repeat `service_type = OIL_CHANGE` |
+# MAGIC | `service_date` is ISO, but ranges from 1900 to 2101: 38,518 before 1950, 190,481 in the future | `try_cast` to date; out of range → null + `invalid_service_date` (228,999) |
+# MAGIC | `km_since_prev < 0` exactly where `odometer_monotonic_flag = 0` (1,346,300); null = first event of each vehicle (419,641) | Flag `non_monotonic_odometer`, values kept |
+# MAGIC | 117 key groups on (`car_id`, `service_date`, `odometer_km`, `event_type`), all REPAIR, but 0 identical rows: they differ in `cost_eur`, `downtime_days` and the odometer chain | Two real repairs on the same day → both kept; `service_event_id` hashes all source columns |
+# MAGIC | `cost_eur` and `downtime_days` filled in exactly 99,848 rows = the REPAIR events | Kept as nullable columns; no defaults in Silver |
+# MAGIC | Oil Change = MAINTENANCE/LOW, Big Service = INSPECTION/LOW, repair = REPAIR/HIGH, Engine Work = INSPECTION/LOW, Body Work = UNKNOWN/MEDIUM | Reliability Score must use `service_type` (Big Service is regular maintenance, Engine Work is a failure) |
+# MAGIC | `odometer_km = 0` in 378,932 rows | Kept; to be considered in Gold (e.g. first service of a new car) |

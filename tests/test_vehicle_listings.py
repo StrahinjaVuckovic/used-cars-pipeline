@@ -57,13 +57,16 @@ EXPECTED_DTYPES = {
     "platform_id": "int", "platform_name": "string", "listing_url": "string", "region": "string",
     "region_url": "string", "state": "string", "latitude": "double", "longitude": "double",
     "price": "decimal(18,2)", "currency": "string", "manufacture_year": "int", "model": "string",
-    "model_normalized": "string", "condition": "string", "cylinders": "int", "fuel": "string",
+    "model_normalized": "string", "manufacturer": "string", "manufacturer_source": "string", "condition": "string", "cylinders": "int", "fuel": "string",
     "odometer": "int", "title_status": "string", "transmission": "string", "vin": "string",
     "drive": "string", "size": "string", "body_type": "string", "paint_color": "string",
     "image_url": "string", "description": "string", "posting_date": "date", "posting_date_raw": "string",
     "ingestion_date": "date", "source_file_path": "string", "silver_processed_at": "timestamp",
     "dq_issues": "array<string>", "is_valid": "boolean",
 }
+BRAND_COLUMNS = ["manufacturer", "manufacturer_source"]
+# clean_vehicle_listings runs per source; the brand columns are added after the union.
+CLEANED_DTYPES = {c: t for c, t in EXPECTED_DTYPES.items() if c not in BRAND_COLUMNS}
 
 
 @pytest.fixture(scope="module")
@@ -130,8 +133,9 @@ def test_valid_row_is_standardized(spark, nb):
 
 def test_final_schema_matches_documentation(spark, nb):
     df = clean(spark, nb, [raw_row()])
-    assert df.columns == nb["VEHICLE_LISTINGS_COLUMNS"]
-    assert dict(df.dtypes) == EXPECTED_DTYPES
+    assert df.columns == [c for c in nb["VEHICLE_LISTINGS_COLUMNS"] if c not in BRAND_COLUMNS]
+    assert dict(df.dtypes) == CLEANED_DTYPES
+    assert nb["VEHICLE_LISTINGS_COLUMNS"] == list(EXPECTED_DTYPES)  # full table incl. brand columns
 
 
 @pytest.mark.parametrize(
@@ -248,6 +252,68 @@ def test_missing_bronze_column_fails(spark, nb):
         nb["clean_vehicle_listings"](raw_df, "First", INGESTION_DATE)
 
 
+# ---------- brand mapping ----------
+
+LOOKUP_ROWS = [
+    ("tacoma", "toyota"),
+    ("Tacoma", "Toyota"),            # Title Case copy of the row above (91 such rows in the real lookup)
+    ("silverado  1500", "chevrolet"),  # extra space in the lookup
+    ("astra", "saturn"),
+    ("astra", "Opel"),               # conflict: one model, two manufacturers
+    ("range rover", "land rover"),
+    ("NaN", "ford"),                 # "no data" model
+]
+
+
+def brand_lookup(spark, nb):
+    raw = spark.createDataFrame(LOOKUP_ROWS, "model STRING, manufacturer STRING")
+    return nb["clean_brand_lookup"](raw)
+
+
+def listings(spark, rows):
+    return spark.createDataFrame(rows, "vehicle_id STRING, model_normalized STRING, listing_url STRING")
+
+
+def test_clean_brand_lookup_normalizes_deduplicates_and_drops_conflicts(spark, nb):
+    lookup = {r.model_normalized: r.manufacturer for r in brand_lookup(spark, nb).collect()}
+    assert lookup == {"tacoma": "toyota", "silverado 1500": "chevrolet", "range rover": "land rover"}
+
+
+def test_add_manufacturer_lookup_then_url_then_null(spark, nb):
+    df = listings(spark, [
+        ("v1", "tacoma", "https://x.craigslist.org/cto/d/city-2015-toyota-tacoma/1.html"),
+        ("v2", "lac xt5 crossover", "https://x.craigslist.org/ctd/d/new-castle-2018-cadillac-xt5/2.html"),
+        ("v3", "astra", "https://x.craigslist.org/cto/d/city-2008-saturn-astra/3.html"),
+        ("v4", "freightliner cascadia", "https://x.craigslist.org/cto/d/florence-refrigerated-box-truck/4.html"),
+        ("v5", None, None),
+        ("v6", "defender", "https://x.craigslist.org/cto/d/city-1995-land-rover-defender/6.html"),
+    ])
+    extra = spark.createDataFrame([("xt5", "cadillac"), ("ion", "saturn")], "m STRING, f STRING")
+    lookup = brand_lookup(spark, nb).union(extra)
+    result = {r.vehicle_id: (r.manufacturer, r.manufacturer_source)
+              for r in nb["add_manufacturer"](df, lookup).collect()}
+    assert result == {
+        "v1": ("toyota", "lookup"),
+        "v2": ("cadillac", "listing_url"),   # model text lost its first characters; the URL still has the brand
+        "v3": ("saturn", "listing_url"),     # conflicting model is not mapped by the lookup
+        "v4": (None, None),                  # brand not in the lookup and not in the URL
+        "v5": (None, None),
+        "v6": ("land rover", "listing_url"),  # "land-rover" in the URL, not "rover"
+    }
+
+
+def test_add_manufacturer_never_multiplies_rows(spark, nb):
+    df = listings(spark, [("v1", "tacoma", None), ("v2", "silverado 1500", None)])
+    result = nb["add_manufacturer"](df, brand_lookup(spark, nb))
+    assert result.count() == 2
+
+
+def test_url_match_needs_whole_word(spark, nb):
+    df = listings(spark, [("v1", "unknown", "https://x.craigslist.org/cto/d/city-rammed-truck/1.html")])
+    row = nb["add_manufacturer"](df, spark.createDataFrame([("1500", "ram")], "model_normalized STRING, manufacturer STRING")).first()
+    assert (row.manufacturer, row.manufacturer_source) == (None, None)
+
+
 # ---------- real samples from every source ----------
 
 
@@ -259,7 +325,7 @@ def test_real_sample_per_source(spark, nb, bronze_sample, source_system):
     df = nb["clean_vehicle_listings"](raw_df, source_system, INGESTION_DATE)
 
     assert df.count() == SAMPLE_ROWS
-    assert dict(df.dtypes) == EXPECTED_DTYPES
+    assert dict(df.dtypes) == CLEANED_DTYPES
     assert df.filter(F.col("posting_date_raw").isNotNull() & F.col("posting_date").isNull()).count() == 0
     assert df.select("vehicle_id").distinct().count() == SAMPLE_ROWS
     assert df.filter(F.col("cylinders").isNotNull()).count() > 0
@@ -293,6 +359,11 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
         for r in table.groupBy("source_system").agg(F.collect_set("currency").alias("currencies")).collect()
     }
     assert currencies["Second"] == ["EUR"] and currencies["Third"] == ["AUD"] and currencies["Fourth"] == ["GBP"]
+
+    sources = {r.manufacturer_source: r["count"] for r in table.groupBy("manufacturer_source").count().collect()}
+    assert set(sources) <= {"lookup", "listing_url", None}
+    assert sources["lookup"] / table.count() > 0.9  # profiling: ~96% of listings match the lookup
+    assert table.filter("manufacturer_source IS NOT NULL AND manufacturer IS NULL").count() == 0
     assert len(namespace["display"].results) >= 5  # every report cell ran without errors
 
 

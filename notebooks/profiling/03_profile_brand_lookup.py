@@ -190,14 +190,14 @@ matched_listings.unpersist()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Findings → plan for Silver task 3
+# MAGIC ## Findings → decisions in Silver task 3
 # MAGIC
-# MAGIC Local check on the full files (to be confirmed by running this notebook on the cluster):
+# MAGIC Results on the full data of the `2026-11-03` ingestion. Implemented in `02_silver_vehicle_listings`
+# MAGIC (`clean_brand_lookup`, `add_manufacturer`):
 # MAGIC
-# MAGIC | Finding | Consequence |
+# MAGIC | Finding | Decision |
 # MAGIC |---|---|
-# MAGIC | 23,848 rows, no empty values, no duplicate raw model | Small enough to be a broadcast reference table |
-# MAGIC | 91 models appear twice: lower case and Title Case (`tacoma, toyota` and `Tacoma, Toyota`) | Normalize model and manufacturer (trim, single spaces, lower case) and deduplicate → 23,757 keys, 45 manufacturers (64 before normalization) |
-# MAGIC | After normalization one real conflict: `astra` → `saturn` and `opel` | Decide one rule in Silver task 3 (e.g. flag the conflict and leave manufacturer null, or pick by platform/currency) – never an arbitrary pick |
-# MAGIC | Fourth source: ~96.5% of listings match exactly | A plain join already covers most listings |
-# MAGIC | Unmatched: models starting with a year, brands missing from the lookup (freightliner, hummer, scion, genesis, ...) | Unmatched rows keep `manufacturer = null` (no guessing in Silver); a URL-based fallback is decided from the numbers above |
+# MAGIC | 23,848 rows, no empty values, no duplicate raw model; 95 rows in Title Case, 91 of them copies of a lower-case row | Normalize model and manufacturer (trim, single spaces, lower case) and deduplicate → 45 manufacturers (64 before normalization) |
+# MAGIC | One conflict after normalization: `astra` → saturn and opel | Removed from the lookup (no arbitrary pick); such listings can still get a brand from the URL |
+# MAGIC | Exact join covers 96.26–96.52% of listings per source; 23,756 of 28,569 distinct listing models are found (the lookup was built from these listings) | Lookup join is the primary source: `manufacturer_source = 'lookup'` |
+# MAGIC | Unmatched models: brands missing from the lookup (scion, freightliner, hummer, international, isuzu, genesis, maserati, ...), models starting with a year, and model texts with a cut-off start (`lac xt5` = cadillac, `des-benz cla` = mercedes-benz) | Fallback: known manufacturer in the Craigslist URL slug (3,083 listings) → `manufacturer_source = 'listing_url'`; otherwise null |

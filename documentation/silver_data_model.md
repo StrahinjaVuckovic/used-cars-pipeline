@@ -86,11 +86,13 @@ Findings that shaped the model:
 - Extreme values: price up to 3.7 billion, year up to 2100, odometer up to 10,000,000,
   latitude ±199, longitude ±399.
 - ServiceBook: `root_cause`, `warranty_flag` and `is_tyre` have a single value in all rows.
-  `service_date` ranges from 1900 to 2101. 117 duplicate events.
+  `service_date` ranges from 1900 to 2101. 117 pairs of REPAIR events share car, date, odometer and event type,
+  but no row is identical in every column: they differ in `cost_eur`, `downtime_days` and the odometer chain,
+  so they are two real repairs on the same day and both are kept.
   `km_since_prev` is negative exactly when `odometer_monotonic_flag = 0`.
 - Both CSV files use Windows line endings (`\r\n`). `FirstSourceSystem.csv` also has 5,277 bare carriage
   returns (`\r`) inside quoted `description` values (2,558 rows). Spark treats a bare `\r` as a line end, so
-  without `multiLine` those rows are split into broken rows (seen on the cluster as 108,156 instead of
+  without `multiLine` those rows are split into broken rows (a raw read gives 111,332 rows with 4,362 malformed ids; the Silver table showed 108,156 after deduplication, instead of
   106,970 rows). First is therefore read with `multiLine=true`. `ServiceBook.csv` has `\r` only in its
   line endings and is read without `multiLine`, which keeps the 1.2 GB read parallel.
 - Every listing `id` and ServiceBook `car_id` is exactly 12 lower-case hex characters. Notebook 02 uses
@@ -112,6 +114,8 @@ erDiagram
         int manufacture_year
         string model
         string model_normalized
+        string manufacturer
+        string manufacturer_source
         int odometer
         date posting_date
         array dq_issues
@@ -165,7 +169,9 @@ conversion and the Gold vehicle/listing tables.
 | `currency` | `currency` | string | upper; must be USD, GBP, EUR or AUD | `invalid_currency` |
 | `manufacture_year` | `year` | int | must be ≥ 1900 and ≤ posting year + 1 | `invalid_manufacture_year` |
 | `model` | `model` | string | trim, repeated spaces collapsed | — |
-| `model_normalized` | `model` | string | lower-case `model`; join key for brand mapping | — |
+| `model_normalized` | `model` | string | trim, single spaces, lower case; join key for brand mapping | — |
+| `manufacturer` | lookup / `url` | string | brand from `model_to_brand_lookup.csv`, else from the listing URL, else null (see Brand mapping) | — |
+| `manufacturer_source` | — | string | `lookup`, `listing_url` or null (manufacturer unknown) | — |
 | `condition` | `condition` | string | lower, trim | — |
 | `cylinders` | `cylinders` | int | `"6 cylinders"` → 6; `"other"` → null | — |
 | `fuel` | `fuel` | string | lower, trim | — |
@@ -191,8 +197,29 @@ conversion and the Gold vehicle/listing tables.
 (Craigslist is a US platform), so the column is named `odometer` without a unit suffix.
 It will be renamed once the unit is confirmed.
 
-**Not done here:** currency conversion (Silver view, later), brand mapping (next Silver task),
-default values for `null`, removal of invalid rows (Gold).
+**Not done here:** currency conversion (Silver view, later), default values for `null`,
+removal of invalid rows (Gold).
+
+### Brand mapping (model → manufacturer)
+
+Based on `notebooks/profiling/03_profile_brand_lookup.py`; implemented in `02_silver_vehicle_listings`
+(`clean_brand_lookup`, `add_manufacturer`). The lookup is a reference used for enrichment only; it is not
+stored as a separate Silver table (Gold `dim_brand_model` can be built from `vehicle_listings`).
+
+1. **Clean the lookup:** model normalized like `model_normalized`, manufacturer lower-cased, duplicates removed.
+   This removes the 91 Title Case copies (`Tacoma, Toyota` next to `tacoma, toyota`) → 45 manufacturers.
+2. **Conflicts are not guessed:** a model that maps to more than one manufacturer (`astra` → saturn / opel)
+   is removed from the lookup.
+3. **Lookup join** (broadcast, left) on `model_normalized` → `manufacturer_source = 'lookup'`
+   (96.26–96.52% of listings per source).
+4. **URL fallback** for the rest: the first known manufacturer that appears as a whole word in the listing URL
+   slug (`.../d/new-castle-2018-cadillac-xt5-crossover/...`; spaces in names are `-` in URLs, longer names are
+   tried first) → `manufacturer_source = 'listing_url'` (~3,083 listings). It also recovers models whose text
+   lost its first characters in the source (`lac xt5 crossover`, `des-benz cla`).
+5. **Otherwise null.** Brands missing from the lookup (scion, freightliner, hummer, ...) stay unknown.
+   An unknown manufacturer is missing data, not an invalid value, so it is not a DQ issue.
+
+The notebook checks that the cleaned lookup key is unique and that the row count is unchanged after the join.
 
 ---
 
@@ -202,13 +229,15 @@ default values for `null`, removal of invalid rows (Gold).
 It is the basis for the Reliability Score in Gold.
 
 **Grain:** one row per service event.
-**Key:** `service_event_id` = `sha2(car_id || service_date || odometer_km || event_type || service_type_raw)`
-computed on the raw values, so the key stays stable even when a value is later nulled by validation.
+**Key:** `service_event_id` = `sha2` over **all** raw source columns (joined with `||`), computed before any
+cleaning, so the key stays stable even when a value is later nulled by validation. A shorter key
+(car, date, odometer, event type) is not unique: the source has 117 pairs of real repairs on the same day.
+Only rows identical in every column are removed as duplicates (none in the 2026-11-03 ingestion).
 **Relationship:** `vehicle_id` → `vehicle_listings.vehicle_id` (many-to-one, not enforced).
 
 | Column | Source column | Type | Transformation / rule | DQ issue |
 |---|---|---|---|---|
-| `service_event_id` | — | string | SHA-256 hash (see above); deduplicated | — |
+| `service_event_id` | — | string | SHA-256 hash (see above); only fully identical rows are deduplicated | — |
 | `vehicle_id` | `car_id` | string | trim; renamed to match `vehicle_listings` | — |
 | `service_date` | `service_date` | date | `try_cast` to date; must be ≥ 1950-01-01 and ≤ today | `unparsed_service_date`, `invalid_service_date` |
 | `odometer_km` | `odometer_km` | int | must be ≥ 0 and ≤ 2,000,000 | `invalid_odometer_km` |

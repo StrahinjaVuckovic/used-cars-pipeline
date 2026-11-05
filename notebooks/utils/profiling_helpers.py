@@ -27,6 +27,11 @@ def column_profile(df: DataFrame, null_tokens: list = None) -> DataFrame:
 
     With `null_tokens` (e.g. NULL_TOKENS from silver_transformations), string columns also get the % of
     values that are not real nulls but text meaning "no data" ("", "NaN", "None", ...).
+
+    How to read it:
+    - min/max of a string column are alphabetical: "999997.0" > "9999958.0" as text. CSV numbers are strings,
+      so use numeric_summary for their real range.
+    - approx_distinct uses a fast estimate (a few % error on large columns); use countDistinct for an exact count.
     """
     total = df.count()
     if total == 0:

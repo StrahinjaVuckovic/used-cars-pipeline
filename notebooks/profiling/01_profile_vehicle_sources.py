@@ -81,7 +81,8 @@ for source_name in SOURCES:
 # MAGIC Some `description` values in the First CSV contain a bare carriage return (`\r`) inside quotes.
 # MAGIC A normal CSV read treats it as the end of a line and splits the row, which creates broken rows whose
 # MAGIC `id` is a piece of text. Reading with `multiLine` keeps quoted values together.
-# MAGIC Expected on the full file: 108,156 rows without multiLine vs 106,970 with it.
+# MAGIC Result on the full file: 111,332 rows and 4,362 malformed ids without multiLine vs 106,970 and 0 with it
+# MAGIC (every extra row is a broken fragment).
 
 # COMMAND ----------
 
@@ -104,7 +105,8 @@ else:
 # MAGIC
 # MAGIC For every selected source:
 # MAGIC 1. row count and schema,
-# MAGIC 2. column profile: null %, "no data" text tokens, distinct values, min/max,
+# MAGIC 2. column profile: null %, "no data" text tokens, distinct values, min/max
+# MAGIC    (min/max of string columns are alphabetical and the distinct count is an estimate),
 # MAGIC 3. line breaks and untrimmed text,
 # MAGIC 4. key: unique and well-formed `id`,
 # MAGIC 5. most frequent values of the categorical columns,
@@ -206,9 +208,9 @@ for df in raw_sources.values():
 # MAGIC |---|---|
 # MAGIC | Same 28 columns in all four sources; CSV has only strings, the other formats are typed | Common raw types with `try_cast`, then `unionByName` into one table |
 # MAGIC | 106,970 rows per source, `id` unique, no id in two sources, every id = 12 hex characters | `vehicle_id` is the primary key; structural check stops the run on a malformed id |
-# MAGIC | First CSV: bare `\r` inside descriptions (108,156 rows without multiLine) | First is read with `multiLine=true` |
+# MAGIC | First CSV: bare `\r` inside descriptions (111,332 rows / 4,362 malformed ids without multiLine) | First is read with `multiLine=true` |
 # MAGIC | `posting_date`: one format per platform (Craigslist `MM/dd/yyyy`, CarGurus `yyyy-MM-dd`, AutoScout24 `dd.MM.yyyy`, CarsGuide `MMMM d, yyyy`) | Regex-dispatched parsing, original kept as `posting_date_raw` |
 # MAGIC | `source_system_name` = listing platform, mixed inside every file; `SourceSystemId` = one UUID per file | `platform_id`/`platform_name` and `source_system`/`source_system_uuid` kept as separate columns |
-# MAGIC | Currency: First mixed by platform, Second EUR, Third AUD, Fourth GBP | Price stays in its original currency; conversion happens in the Silver view |
+# MAGIC | Currency: First is fixed per platform (CarGurus GBP, Craigslist USD, CarsGuide AUD, AutoScout24 EUR), Second EUR, Third AUD, Fourth GBP | Price stays in its original currency; conversion happens in the Silver view |
 # MAGIC | Extremes: price up to billions, year up to 2100, odometer up to 10M, lat/long out of range | Out-of-range values → null + `dq_issues`; limits above the 99th percentile |
 # MAGIC | `cylinders` is text (`"6 cylinders"`, `"other"`), categories in mixed case, "no data" text tokens | Number extracted from text; lower-case categories; `standardize_nulls` |

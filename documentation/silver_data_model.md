@@ -209,14 +209,15 @@ stored as a separate Silver table (Gold `dim_brand_model` can be built from `veh
 1. **Clean the lookup:** model normalized like `model_normalized`, manufacturer lower-cased, duplicates removed.
    This removes the 91 Title Case copies (`Tacoma, Toyota` next to `tacoma, toyota`) → 45 manufacturers.
 2. **Conflicts are not guessed:** a model that maps to more than one manufacturer (`astra` → saturn / opel)
-   is removed from the lookup.
+   is removed from the lookup. `opel` has no other model, so the cleaned lookup has 23,756 models and
+   44 manufacturers (verified on the cluster).
 3. **Lookup join** (broadcast, left) on `model_normalized` → `manufacturer_source = 'lookup'`
-   (96.26–96.52% of listings per source).
+   (96.26–96.52% of listings per source; 412,552 listings = 96.42% in total).
 4. **URL fallback** for the rest: the first known manufacturer that appears as a whole word in the listing URL
    slug (`.../d/new-castle-2018-cadillac-xt5-crossover/...`; spaces in names are `-` in URLs, longer names are
-   tried first) → `manufacturer_source = 'listing_url'` (~3,083 listings). It also recovers models whose text
+   tried first) → `manufacturer_source = 'listing_url'` (3,181 listings = 0.74%). It also recovers models whose text
    lost its first characters in the source (`lac xt5 crossover`, `des-benz cla`).
-5. **Otherwise null.** Brands missing from the lookup (scion, freightliner, hummer, ...) stay unknown.
+5. **Otherwise null** (12,147 listings = 2.84%). Brands missing from the lookup (scion, freightliner, hummer, ...) stay unknown.
    An unknown manufacturer is missing data, not an invalid value, so it is not a DQ issue.
 
 The notebook checks that the cleaned lookup key is unique and that the row count is unchanged after the join.

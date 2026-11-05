@@ -7,13 +7,17 @@
 # MAGIC - Configures OAuth (service principal) access to ADLS Gen2.
 # MAGIC - All credentials come from the Key Vault-backed secret scope `key-vault-secrets`.
 # MAGIC   Only non-secret names (storage account, containers, scope name) are defined here.
-# MAGIC - Defines storage paths, source definitions and a helper that resolves Bronze ingestion partitions.
+# MAGIC - Defines storage paths (landing, bronze, silver, gold), source definitions and a helper that resolves
+# MAGIC   Bronze ingestion partitions.
 
 # COMMAND ----------
 
 SECRET_SCOPE = "key-vault-secrets"
 STORAGE_ACCOUNT = "sausedcarspipelinesv"
 
+# Landing: where source files arrive (one folder per source, same folder names as in Bronze).
+# ADF copies them from here into Bronze partitions <Source>/ingestion_date=YYYY-MM-DD/.
+LANDING_PATH = f"abfss://landing@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 BRONZE_PATH = f"abfss://bronze@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 SILVER_PATH = f"abfss://silver@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 GOLD_PATH = f"abfss://gold@{STORAGE_ACCOUNT}.dfs.core.windows.net"

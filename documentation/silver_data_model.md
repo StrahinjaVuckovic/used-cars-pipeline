@@ -89,7 +89,25 @@ Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ─�
 - `03_silver_vehicle_listings` reads the four stage tables and **stops** if one is missing or if they come from
   different ingestion dates (otherwise the table would mix two days). Then it unions them, maps the brands and
   checks that `vehicle_id` is unique across all sources.
-- The tasks run as the Databricks Job `silver_daily` (definition in `orchestration/`).
+- The tasks run as the Databricks Job `silver_daily`, defined in
+  `orchestration/databricks_job_silver_daily.yml` (Databricks Asset Bundle format, exported from the UI):
+  `validate_landing_and_bronze` (01) first; then the four `stage_<source>_source` tasks (02) and
+  `service_events` (04) in parallel; `vehicle_listings` (03) runs only when all four source tasks succeeded.
+  Job parameters `ingestion_date` (default `latest`) and `dev_mode` (default `false`) reach every notebook as
+  widgets. All tasks use the existing cluster `used-cars-cluster`. Runs are started manually for now; the daily
+  trigger comes with the ADF orchestration. Queueing is on, so a second run waits instead of overwriting the
+  same tables in parallel.
+- Verified on 2026-11-06 (full run, Bronze `ingestion_date=2026-11-05`, 5 min 32 s including cluster start):
+  - stage tables: 4 × 106,970 rows;
+  - `vehicle_listings`: 427,880 rows;
+    - valid %: First 94.20, Second 94.29, Third 94.46, Fourth 94.32;
+    - brands: lookup 412,552, listing URL 3,181, unknown 12,147;
+  - `service_events`: 8,312,490 rows, with 100% of service-book vehicles present in `vehicle_listings`.
+
+  The results equal the runs before the split, so splitting per source and validating against
+  `ingestion_date` changed no data.
+- `service_events` runs in parallel with the vehicle tasks, so its coverage check (informational only) reads
+  the `vehicle_listings` table of the previous run.
 
 ## Source profiling summary (ingestion 2026-11-03)
 

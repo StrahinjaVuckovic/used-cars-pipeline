@@ -1,0 +1,87 @@
+# Databricks Job "silver_daily": the Silver layer as a pipeline.
+#
+# Exported from the Databricks UI ("View as code", Databricks Asset Bundle format) after a successful full run
+# on 2026-11-06 (Bronze ingestion_date=2026-11-05). One change to the export: the notebook paths are relative
+# to this file instead of the personal workspace Git folder
+# (/Workspace/Users/<user>/used-cars-pipeline/notebooks/...), so the file contains no user name and can be
+# deployed with `databricks bundle deploy` from the repository.
+#
+# Task graph:
+#   validate_landing_and_bronze (01)
+#    ├─ stage_first_source  (02) ┐
+#    ├─ stage_second_source (02) ├─► vehicle_listings (03)
+#    ├─ stage_third_source  (02) │
+#    ├─ stage_fourth_source (02) ┘
+#    └─ service_events (04)
+#
+# Job parameters are passed to every notebook task as widgets of the same name.
+# The cluster id is the existing all-purpose cluster used-cars-cluster (not a secret). No schedule yet: runs
+# are started manually; the daily trigger comes with the ADF orchestration.
+
+resources:
+  jobs:
+    silver_daily:
+      name: silver_daily
+      tasks:
+        - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/01_validate_landing_and_bronze
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: service_events
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/04_silver_service_events
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: stage_first_source
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_stage_first_source
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: stage_second_source
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_stage_second_source
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: stage_third_source
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_stage_third_source
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: stage_fourth_source
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_stage_fourth_source
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        # Runs only when all four source tasks succeeded (default run_if: ALL_SUCCESS),
+        # so a failed source never produces an incomplete vehicle_listings table.
+        - task_key: vehicle_listings
+          depends_on:
+            - task_key: stage_first_source
+            - task_key: stage_second_source
+            - task_key: stage_third_source
+            - task_key: stage_fourth_source
+          notebook_task:
+            notebook_path: ../notebooks/03_silver_vehicle_listings
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+      # A run started while another is active waits in the queue instead of running in parallel
+      # (two runs would overwrite the same Delta tables).
+      queue:
+        enabled: true
+
+      parameters:
+        - name: dev_mode
+          default: "false"
+        - name: ingestion_date
+          default: latest

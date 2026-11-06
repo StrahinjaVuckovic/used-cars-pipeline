@@ -1,4 +1,4 @@
-"""Tests for notebooks/03_silver_service_events.py (full notebook runs on crafted and real samples)."""
+"""Tests for notebooks/04_silver_service_events.py (full notebook runs on crafted and real samples)."""
 
 import datetime
 from decimal import Decimal
@@ -8,7 +8,7 @@ import pytest
 from conftest import SAMPLE_ROWS, catalog_database_names, write_service_book_partition
 from notebook_utils import load_config_and_utils, run_notebook
 
-NOTEBOOK = "03_silver_service_events.py"
+NOTEBOOK = "04_silver_service_events.py"
 
 EXPECTED_DTYPES = {
     "service_event_id": "string", "vehicle_id": "string", "service_date": "date", "odometer_km": "int",
@@ -199,3 +199,18 @@ def test_coverage_against_vehicle_listings(spark, tmp_path, capsys):
     write_service_book_partition(bronze, "\n".join([HEADER, *EDGE_CASE_ROWS]) + "\n")
     run_service_events_notebook(spark, bronze, silver)
     assert "2 of 6 service-book vehicles (33.33%) exist in" in capsys.readouterr().out
+
+
+def test_service_date_after_the_ingestion_date_is_invalid(spark, tmp_path):
+    """Idempotency: "in the future" is relative to the Bronze ingestion date, not to the day of the run."""
+    rows = [
+        "c1,2026-11-03,10026.0,MAINTENANCE,OIL/OIL_FILTER,LOW,UNKNOWN,False,1,0,0,0,1,15000.0,,,1,,0.0,,,Oil Change,,oil change",
+        "c1,2026-11-04,10500.0,MAINTENANCE,OIL/OIL_FILTER,LOW,UNKNOWN,False,1,0,0,0,1,15000.0,,,1,,0.0,,,Oil Change,,oil change",
+    ]
+    bronze = tmp_path / "bronze"
+    write_service_book_partition(bronze, "\n".join([HEADER, *rows]) + "\n")  # partition 2026-11-03
+    _, result = run_service_events_notebook(spark, bronze, tmp_path / "silver")
+    by_odometer = {r.odometer_km: r for r in result.collect()}
+    assert by_odometer[10026].dq_issues == []  # on the ingestion date itself: valid
+    assert by_odometer[10500].service_date is None
+    assert by_odometer[10500].dq_issues == ["invalid_service_date"]

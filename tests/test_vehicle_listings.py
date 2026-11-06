@@ -1,4 +1,8 @@
-"""Tests for notebooks/02_silver_vehicle_listings.py (clean_vehicle_listings and the full notebook run)."""
+"""
+Tests for the vehicle listings pipeline: the shared cleaning code (notebooks/utils/vehicle_listings_cleaning.py),
+the four per-source stage notebooks (02_silver_stage_<source>_source.py) and the union + brand mapping notebook
+(03_silver_vehicle_listings.py).
+"""
 
 import csv
 import datetime
@@ -12,7 +16,13 @@ from pyspark.sql import functions as F
 from conftest import INGESTION_DATE, SAMPLE_ROWS
 from notebook_utils import load_config_and_utils, run_notebook, run_notebook_cells_until
 
-NOTEBOOK = "02_silver_vehicle_listings.py"
+CLEANING_UTILS = "utils/vehicle_listings_cleaning.py"
+LISTINGS_NOTEBOOK = "03_silver_vehicle_listings.py"
+SOURCES = ["First", "Second", "Third", "Fourth"]
+
+
+def stage_notebook(source_system: str) -> str:
+    return f"02_silver_stage_{source_system.lower()}_source.py"
 
 
 def first_csv_path(bronze: Path) -> Path:
@@ -43,14 +53,30 @@ def first_row_value(bronze: Path, column: str) -> str:
         return next(reader)[header.index(column)]
 
 
-def run_listings_notebook(spark, bronze: Path, silver: Path, dev_mode: str = "false") -> dict:
+def vehicle_namespace(spark, bronze: Path, silver: Path, dev_mode: str = "false", ingestion_date: str = "latest") -> dict:
+    """Fresh notebook namespace with config, silver_transformations and the shared vehicle cleaning code."""
     namespace = load_config_and_utils(
         spark,
         bronze_path=str(bronze),
         silver_path=str(silver),
-        widget_values={"ingestion_date": "latest", "dev_mode": dev_mode},
+        widget_values={"ingestion_date": ingestion_date, "dev_mode": dev_mode},
     )
-    return run_notebook(NOTEBOOK, namespace)
+    return run_notebook(CLEANING_UTILS, namespace)
+
+
+def run_stage(spark, bronze: Path, silver: Path, source_system: str, dev_mode: str = "false") -> dict:
+    return run_notebook(stage_notebook(source_system), vehicle_namespace(spark, bronze, silver, dev_mode))
+
+
+def run_listings(spark, bronze: Path, silver: Path, dev_mode: str = "false", ingestion_date: str = "latest") -> dict:
+    return run_notebook(LISTINGS_NOTEBOOK, vehicle_namespace(spark, bronze, silver, dev_mode, ingestion_date))
+
+
+def run_listings_pipeline(spark, bronze: Path, silver: Path, dev_mode: str = "false") -> dict:
+    """The four stage notebooks, then the union notebook (like the Databricks Job). Returns the 03 namespace."""
+    for source_system in SOURCES:
+        run_stage(spark, bronze, silver, source_system, dev_mode)
+    return run_listings(spark, bronze, silver, dev_mode)
 
 EXPECTED_DTYPES = {
     "vehicle_id": "string", "source_system": "string", "source_system_uuid": "string",
@@ -71,14 +97,11 @@ CLEANED_DTYPES = {c: t for c, t in EXPECTED_DTYPES.items() if c not in BRAND_COL
 
 @pytest.fixture(scope="module")
 def nb(spark, tmp_path_factory):
-    """Namespace with config, utils and the 02 notebook cells up to (not including) the pipeline run."""
-    namespace = load_config_and_utils(
-        spark,
-        bronze_path=str(tmp_path_factory.mktemp("unused-bronze")),
-        silver_path=str(tmp_path_factory.mktemp("unused-silver")),
-        widget_values={"ingestion_date": "latest", "dev_mode": "false"},
+    """Namespace with config, the shared cleaning code and the 03 cells up to (not including) the pipeline run."""
+    namespace = vehicle_namespace(
+        spark, tmp_path_factory.mktemp("unused-bronze"), tmp_path_factory.mktemp("unused-silver")
     )
-    return run_notebook_cells_until(NOTEBOOK, namespace, "## Read and clean each source")
+    return run_notebook_cells_until(LISTINGS_NOTEBOOK, namespace, "## Read the four stage tables")
 
 
 def raw_row(**overrides) -> dict:
@@ -98,11 +121,11 @@ def raw_row(**overrides) -> dict:
     return row
 
 
-def clean(spark, nb, rows, source_system="First"):
+def clean(spark, nb, rows, source_system="First", ingestion_date=INGESTION_DATE):
     columns = list(raw_row().keys())
     schema = ", ".join(f"`{c}` STRING" for c in columns)
     raw_df = spark.createDataFrame([tuple(r[c] for c in columns) for r in rows], schema)
-    return nb["clean_vehicle_listings"](raw_df, source_system, INGESTION_DATE)
+    return nb["clean_vehicle_listings"](raw_df, source_system, ingestion_date)
 
 
 def clean_one(spark, nb, **overrides):
@@ -133,7 +156,8 @@ def test_valid_row_is_standardized(spark, nb):
 
 def test_final_schema_matches_documentation(spark, nb):
     df = clean(spark, nb, [raw_row()])
-    assert df.columns == [c for c in nb["VEHICLE_LISTINGS_COLUMNS"] if c not in BRAND_COLUMNS]
+    assert df.columns == nb["STAGE_COLUMNS"]
+    assert nb["STAGE_COLUMNS"] == [c for c in nb["VEHICLE_LISTINGS_COLUMNS"] if c not in BRAND_COLUMNS]
     assert dict(df.dtypes) == CLEANED_DTYPES
     assert nb["VEHICLE_LISTINGS_COLUMNS"] == list(EXPECTED_DTYPES)  # full table incl. brand columns
 
@@ -214,6 +238,24 @@ def test_invalid_value_is_nulled_and_flagged(spark, nb, overrides, column, issue
 def test_manufacture_year_one_year_after_posting_is_valid(spark, nb):
     row = clean_one(spark, nb, year="2022.0", posting_date="2021-04-12")
     assert row.manufacture_year == 2022 and row.dq_issues == []
+
+
+@pytest.mark.parametrize("year, valid", [("2011.0", True), ("2012.0", False)])
+def test_without_posting_date_the_year_limit_follows_the_ingestion_date(spark, nb, year, valid):
+    """Idempotency: the limit is ingestion year + 1, not the year of the run, so re-runs give the same result."""
+    row = clean(spark, nb, [raw_row(year=year, posting_date=None)], ingestion_date="2010-06-01").first()
+    assert ("invalid_manufacture_year" not in row.dq_issues) is valid
+
+
+def test_unexpected_currencies(spark, nb):
+    df = spark.createDataFrame([("EUR",), ("GBP",), (None,)], "currency STRING")
+    assert nb["unexpected_currencies"](df, ["EUR"]) == ["GBP"]
+    assert nb["unexpected_currencies"](df, ["EUR", "GBP"]) == []
+
+
+def test_stage_table_path(nb):
+    assert nb["stage_table_path"]("First", False).endswith("/vehicle_listings_stage/first")
+    assert nb["stage_table_path"]("Fourth", True).endswith("/vehicle_listings_stage_dev/fourth")
 
 
 def test_zero_odometer_is_flagged_but_kept(spark, nb):
@@ -333,26 +375,30 @@ def test_real_sample_per_source(spark, nb, bronze_sample, source_system):
     assert currencies - {None} <= {"USD", "GBP", "EUR", "AUD"}
 
 
-# ---------- full notebook run ----------
+# ---------- full pipeline run (4 stage notebooks + 03) ----------
 
 
-def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
-    namespace = load_config_and_utils(
-        spark,
-        bronze_path=str(bronze_sample),
-        silver_path=str(silver_dir),
-        widget_values={"ingestion_date": "latest", "dev_mode": "false"},
-    )
-    run_notebook(NOTEBOOK, namespace)  # the notebook's own asserts run here
+def test_full_pipeline_run(spark, bronze_sample, silver_dir, catalog_untouched):
+    namespace = run_listings_pipeline(spark, bronze_sample, silver_dir)  # the notebooks' own asserts run here
+
+    for source_system in SOURCES:
+        stage_path = silver_dir / "vehicle_listings_stage" / source_system.lower()
+        stage = spark.read.format("delta").load(str(stage_path))
+        assert stage.count() == SAMPLE_ROWS
+        assert {r.source_system for r in stage.select("source_system").distinct().collect()} == {source_system}
+        assert spark.sql(f"DESCRIBE DETAIL delta.`{stage_path}`").first().numFiles == 1
 
     table = spark.read.format("delta").load(str(silver_dir / "vehicle_listings"))
     assert table.count() == 4 * SAMPLE_ROWS
     assert {r.source_system: r["count"] for r in table.groupBy("source_system").count().collect()} == {
         "First": SAMPLE_ROWS, "Second": SAMPLE_ROWS, "Third": SAMPLE_ROWS, "Fourth": SAMPLE_ROWS,
     }
+    assert table.columns == namespace["VEHICLE_LISTINGS_COLUMNS"]
+    assert dict(table.dtypes) == EXPECTED_DTYPES
     assert (silver_dir / "vehicle_listings" / "_delta_log").is_dir()
     detail = spark.sql(f"DESCRIBE DETAIL delta.`{silver_dir / 'vehicle_listings'}`").first()
     assert detail.numFiles == namespace["OUTPUT_FILES"]  # no small-files problem
+    assert namespace["stage_ingestion_date"] == INGESTION_DATE
 
     currencies = {
         r.source_system: r.currencies
@@ -364,23 +410,54 @@ def test_full_notebook_run(spark, bronze_sample, silver_dir, catalog_untouched):
     assert set(sources) <= {"lookup", "listing_url", None}
     assert sources["lookup"] / table.count() > 0.9  # profiling: ~96% of listings match the lookup
     assert table.filter("manufacturer_source IS NOT NULL AND manufacturer IS NULL").count() == 0
-    assert len(namespace["display"].results) >= 5  # every report cell ran without errors
+    assert len(namespace["display"].results) >= 6  # every report cell ran without errors
 
 
-def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
-    """An impossible date in Bronze must not stop the notebook: the row is written and flagged (option b)."""
+@pytest.mark.parametrize("source_system", SOURCES)
+def test_stage_notebook_has_no_unexpected_currency(spark, bronze_sample, tmp_path, source_system, capsys):
+    namespace = run_stage(spark, bronze_sample, tmp_path / "silver", source_system)
+    assert namespace["other_currencies"] == []
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_listings_notebook_needs_every_stage_table(spark, bronze_sample, tmp_path, catalog_untouched):
+    silver = tmp_path / "silver"
+    for source_system in ["First", "Second", "Third"]:
+        run_stage(spark, bronze_sample, silver, source_system)
+    with pytest.raises(AssertionError, match="No stage table for Fourth .* run 02_silver_stage_fourth_source first"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
+def test_listings_notebook_rejects_mixed_ingestion_dates(spark, bronze_sample, tmp_path, catalog_untouched):
+    silver = tmp_path / "silver"
+    for source_system in SOURCES:
+        run_stage(spark, bronze_sample, silver, source_system)
+    third = str(silver / "vehicle_listings_stage" / "third")
+    older = spark.read.format("delta").load(third).withColumn("ingestion_date", F.to_date(F.lit("2026-11-02")))
+    older.write.format("delta").mode("overwrite").save(third)
+
+    with pytest.raises(AssertionError, match="different ingestion dates"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
+def test_listings_notebook_checks_the_requested_ingestion_date(spark, bronze_sample, tmp_path, catalog_untouched):
+    silver = tmp_path / "silver"
+    for source_system in SOURCES:
+        run_stage(spark, bronze_sample, silver, source_system)
+    with pytest.raises(AssertionError, match=f"built from ingestion_date={INGESTION_DATE}, not 2026-11-05"):
+        run_listings(spark, bronze_sample, silver, ingestion_date="2026-11-05")
+
+
+def test_full_pipeline_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
+    """An impossible date in Bronze must not stop the pipeline: the row is written and flagged (option b)."""
     bronze = copy_bronze_and_edit_first_row(
         bronze_sample, tmp_path, lambda row, header: row.__setitem__(header.index("posting_date"), "02/30/2021")
     )
     bad_vehicle_id = first_row_value(bronze, "id")
 
-    namespace = load_config_and_utils(
-        spark,
-        bronze_path=str(bronze),
-        silver_path=str(tmp_path / "silver"),
-        widget_values={"ingestion_date": "latest", "dev_mode": "false"},
-    )
-    run_notebook(NOTEBOOK, namespace)
+    namespace = run_listings_pipeline(spark, bronze, tmp_path / "silver")
 
     table = spark.read.format("delta").load(str(tmp_path / "silver" / "vehicle_listings"))
     assert table.count() == 4 * SAMPLE_ROWS
@@ -390,15 +467,11 @@ def test_full_notebook_run_continues_with_unparsed_dates(spark, bronze_sample, t
     assert namespace["unparsed_dates"] == 1
 
 
-def test_dev_mode_writes_to_dev_table(spark, bronze_sample, silver_dir, catalog_untouched):
-    namespace = load_config_and_utils(
-        spark,
-        bronze_path=str(bronze_sample),
-        silver_path=str(silver_dir),
-        widget_values={"ingestion_date": "latest", "dev_mode": "true"},
-    )
-    run_notebook(NOTEBOOK, namespace)
+def test_dev_mode_writes_to_dev_tables(spark, bronze_sample, silver_dir, catalog_untouched):
+    run_listings_pipeline(spark, bronze_sample, silver_dir, dev_mode="true")
+    assert (silver_dir / "vehicle_listings_stage_dev" / "first" / "_delta_log").is_dir()
     assert (silver_dir / "vehicle_listings_dev" / "_delta_log").is_dir()
+    assert not (silver_dir / "vehicle_listings_stage").exists()
     assert not (silver_dir / "vehicle_listings").exists()
 
 
@@ -410,21 +483,21 @@ def test_bare_carriage_return_in_description_does_not_split_rows(spark, bronze_s
     )
     vehicle_id = first_row_value(bronze, "id")
 
-    run_listings_notebook(spark, bronze, tmp_path / "silver")
+    run_stage(spark, bronze, tmp_path / "silver", "First")
 
-    table = spark.read.format("delta").load(str(tmp_path / "silver" / "vehicle_listings"))
-    assert table.filter("source_system = 'First'").count() == SAMPLE_ROWS
-    assert table.filter(F.col("vehicle_id") == vehicle_id).first().description == description
+    stage = spark.read.format("delta").load(str(tmp_path / "silver" / "vehicle_listings_stage" / "first"))
+    assert stage.count() == SAMPLE_ROWS
+    assert stage.filter(F.col("vehicle_id") == vehicle_id).first().description == description
 
 
-def test_malformed_vehicle_id_stops_the_notebook(spark, bronze_sample, tmp_path, catalog_untouched):
+def test_malformed_vehicle_id_stops_the_stage_notebook(spark, bronze_sample, tmp_path, catalog_untouched):
     """A vehicle_id that is not 12 hex characters means a wrong parse: the notebook must stop before writing."""
     bronze = copy_bronze_and_edit_first_row(
         bronze_sample, tmp_path, lambda row, header: row.__setitem__(header.index("id"), "broken text")
     )
     with pytest.raises(AssertionError, match="not 12 hex characters"):
-        run_listings_notebook(spark, bronze, tmp_path / "silver")
-    assert not (tmp_path / "silver" / "vehicle_listings").exists()
+        run_stage(spark, bronze, tmp_path / "silver", "First")
+    assert not (tmp_path / "silver" / "vehicle_listings_stage" / "first").exists()
 
 
 def test_bronze_sample_matches_real_first_source_format():

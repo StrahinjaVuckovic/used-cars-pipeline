@@ -35,7 +35,7 @@ LOOKUP_PATH = f"{BRONZE_PATH}/{LOOKUP_SOURCE['folder']}"
 
 
 def normalize_model(column: Column) -> Column:
-    """Same normalization as model_normalized in 02_silver_vehicle_listings: trim, single spaces, lower case."""
+    """Same normalization as model_normalized in utils/vehicle_listings_cleaning: trim, single spaces, lower case."""
     return F.lower(F.regexp_replace(F.trim(column), r"\s+", " "))
 
 
@@ -192,7 +192,7 @@ matched_listings.unpersist()
 # MAGIC %md
 # MAGIC ## Findings → decisions in Silver task 3
 # MAGIC
-# MAGIC Results on the full data of the `2026-11-03` ingestion. Implemented in `02_silver_vehicle_listings`
+# MAGIC Results on the full data of the `2026-11-03` ingestion. Implemented in `03_silver_vehicle_listings`
 # MAGIC (`clean_brand_lookup`, `add_manufacturer`):
 # MAGIC
 # MAGIC | Finding | Decision |

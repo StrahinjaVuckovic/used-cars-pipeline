@@ -3,7 +3,7 @@
 # MAGIC # Profiling 01 – Vehicle listing sources (Bronze)
 # MAGIC
 # MAGIC Looks at the raw vehicle listing files **before** any cleaning, to decide what the Silver layer has to
-# MAGIC fix. Every rule in `notebooks/02_silver_vehicle_listings.py` and `documentation/silver_data_model.md`
+# MAGIC fix. Every rule in `notebooks/utils/vehicle_listings_cleaning.py` and `documentation/silver_data_model.md`
 # MAGIC comes from a finding in this notebook. Nothing is written: the notebook only reads Bronze.
 # MAGIC
 # MAGIC Not part of the daily pipeline. Run it on the full data (not a sample), because rare problems
@@ -46,7 +46,7 @@ print(f"sources={SOURCES}, ingestion_date={INGESTION_DATE}")
 ID_PATTERN = r"^[0-9a-f]{12}$"
 
 # Candidate formats of posting_date. The result of this profile is the source of POSTING_DATE_FORMATS
-# in 02_silver_vehicle_listings.py (one format per listing platform).
+# in utils/vehicle_listings_cleaning.py (one format per listing platform).
 DATE_PATTERNS = {
     "yyyy-MM-dd": r"^\d{4}-\d{2}-\d{2}$",
     "MM/dd/yyyy": r"^\d{2}/\d{2}/\d{4}$",
@@ -204,7 +204,7 @@ for df in raw_sources.values():
 # MAGIC
 # MAGIC Results on the full data of the `2026-11-03` ingestion (see `documentation/silver_data_model.md`):
 # MAGIC
-# MAGIC | Finding | Decision in `02_silver_vehicle_listings` |
+# MAGIC | Finding | Decision in the vehicle Silver notebooks (02 stage + 03) |
 # MAGIC |---|---|
 # MAGIC | Same 28 columns in all four sources; CSV has only strings, the other formats are typed | Common raw types with `try_cast`, then `unionByName` into one table |
 # MAGIC | 106,970 rows per source, `id` unique, no id in two sources, every id = 12 hex characters | `vehicle_id` is the primary key; structural check stops the run on a malformed id |

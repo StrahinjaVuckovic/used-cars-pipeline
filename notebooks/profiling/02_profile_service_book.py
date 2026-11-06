@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Profiling 02 – ServiceBook (Bronze)
 # MAGIC
-# MAGIC Looks at the raw service history before cleaning, to decide what `notebooks/03_silver_service_events.py`
+# MAGIC Looks at the raw service history before cleaning, to decide what `notebooks/04_silver_service_events.py`
 # MAGIC has to fix and which columns the Reliability Score (Gold) can rely on. Nothing is written.
 # MAGIC
 # MAGIC Not part of the daily pipeline. Run it on the full data (~8.3M rows, a few minutes).

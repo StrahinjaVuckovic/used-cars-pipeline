@@ -4,11 +4,14 @@ This document describes the Silver layer tables built from the Bronze layer: the
 keys, columns, cleaning rules and the assumptions they rely on.
 
 Notebooks:
-- `notebooks/02_silver_vehicle_listings.py` → `silver.vehicle_listings`
-- `notebooks/03_silver_service_events.py` → `silver.service_events`
+- `notebooks/02_silver_stage_first_source.py`, `..._second_source.py`, `..._third_source.py`,
+  `..._fourth_source.py` → one stage table per vehicle source (`vehicle_listings_stage/<source>`)
+- `notebooks/03_silver_vehicle_listings.py` → `silver.vehicle_listings` (union of the stage tables + brand mapping)
+- `notebooks/04_silver_service_events.py` → `silver.service_events`
 
-Shared code: `notebooks/00_config.py` (storage access, paths, sources) and
-`notebooks/utils/silver_transformations.py` (reusable cleaning functions).
+Shared code: `notebooks/00_config.py` (storage access, paths, sources),
+`notebooks/utils/silver_transformations.py` (reusable cleaning functions) and
+`notebooks/utils/vehicle_listings_cleaning.py` (cleaning rules and checks shared by the four vehicle sources).
 
 ## Design principles
 
@@ -58,7 +61,35 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources) and
   Delta table history (`VERSION AS OF`). Changes over time are tracked in Gold with SCD Type 2.
 - Backfills must be run in chronological order, because the last processed date becomes the Silver state.
 - If a source ever becomes incremental, `overwrite` must be replaced by a Delta `MERGE` on the table key.
+- **Validation never depends on the run date.** Rules such as "not in the future" compare with the
+  `ingestion_date` of the Bronze partition, not with `current_date()`. The same Bronze input therefore gives the
+  same Silver output on any day (re-runs and backfills). Only `silver_processed_at` changes between runs.
 - *To be confirmed with the mentor.*
+
+## Load flow and pipeline tasks
+
+Every vehicle source is loaded by its **own notebook** (its own pipeline task). In real life sources change
+independently (new columns, other formats), so a change in one source must not touch the others. The cleaning
+rules that are the same for every source are written once in `utils/vehicle_listings_cleaning.py`; a source
+notebook holds only what is specific to its source (reader options via `VEHICLE_SOURCES`, expected currencies,
+notes) and its own checks and DQ report.
+
+```
+Bronze <Source>/ingestion_date=…  ──►  02_silver_stage_<source>_source  ──►  silver/vehicle_listings_stage/<source>
+                                          (×4, independent, in parallel)               │
+Bronze Lookup/  ─────────────────────────────────────────────────────────►  03_silver_vehicle_listings
+                                                                                       ▼
+                                                                            silver/vehicle_listings
+Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ──►  silver/service_events
+```
+
+- **Stage tables** (`vehicle_listings_stage/first|second|third|fourth`, path-based Delta, one file each) hold one
+  cleaned source in the common 36-column shape (no brand columns yet). Pipeline tasks cannot share DataFrames,
+  so the result of a source task is stored for the next task. They are internal: analysts use `vehicle_listings`.
+- `03_silver_vehicle_listings` reads the four stage tables and **stops** if one is missing or if they come from
+  different ingestion dates (otherwise the table would mix two days). Then it unions them, maps the brands and
+  checks that `vehicle_id` is unique across all sources.
+- The tasks run as the Databricks Job `silver_daily` (definition in `orchestration/`).
 
 ## Source profiling summary (ingestion 2026-11-03)
 
@@ -95,7 +126,7 @@ Findings that shaped the model:
   without `multiLine` those rows are split into broken rows (a raw read gives 111,332 rows with 4,362 malformed ids; the Silver table showed 108,156 after deduplication, instead of
   106,970 rows). First is therefore read with `multiLine=true`. `ServiceBook.csv` has `\r` only in its
   line endings and is read without `multiLine`, which keeps the 1.2 GB read parallel.
-- Every listing `id` and ServiceBook `car_id` is exactly 12 lower-case hex characters. Notebook 02 uses
+- Every listing `id` and ServiceBook `car_id` is exactly 12 lower-case hex characters. The vehicle notebooks use
   this as a **structural check**: a `vehicle_id` with any other shape means a file was parsed wrongly, and
   the run stops before writing.
 
@@ -150,7 +181,7 @@ conversion and the Gold vehicle/listing tables.
 
 **Grain:** one row per listing (one car). **Key:** `vehicle_id`.
 **Combined sources:** FirstSourceSystem + SecondSourceSystem + ThirdSourceSystem + FourthSource
-(`unionByName` over a fixed column list).
+(each cleaned by its own stage notebook, then `unionByName` over a fixed column list in `03_silver_vehicle_listings`).
 
 | Column | Source column | Type | Transformation / rule | DQ issue |
 |---|---|---|---|---|
@@ -167,7 +198,7 @@ conversion and the Gold vehicle/listing tables.
 | `longitude` | `long` | double | must be within [-180, 180] | `invalid_longitude` |
 | `price` | `price` | decimal(18,2) | must be > 0 and ≤ 1,000,000 | `invalid_price` |
 | `currency` | `currency` | string | upper; must be USD, GBP, EUR or AUD | `invalid_currency` |
-| `manufacture_year` | `year` | int | must be ≥ 1900 and ≤ posting year + 1 | `invalid_manufacture_year` |
+| `manufacture_year` | `year` | int | must be ≥ 1900 and ≤ posting year + 1 (ingestion year + 1 when `posting_date` is null) | `invalid_manufacture_year` |
 | `model` | `model` | string | trim, repeated spaces collapsed | — |
 | `model_normalized` | `model` | string | trim, single spaces, lower case; join key for brand mapping | — |
 | `manufacturer` | lookup / `url` | string | brand from `model_to_brand_lookup.csv`, else from the listing URL, else null (see Brand mapping) | — |
@@ -202,7 +233,7 @@ removal of invalid rows (Gold).
 
 ### Brand mapping (model → manufacturer)
 
-Based on `notebooks/profiling/03_profile_brand_lookup.py`; implemented in `02_silver_vehicle_listings`
+Based on `notebooks/profiling/03_profile_brand_lookup.py`; implemented in `03_silver_vehicle_listings`
 (`clean_brand_lookup`, `add_manufacturer`). The lookup is a reference used for enrichment only; it is not
 stored as a separate Silver table (Gold `dim_brand_model` can be built from `vehicle_listings`).
 
@@ -240,7 +271,7 @@ Only rows identical in every column are removed as duplicates (none in the 2026-
 |---|---|---|---|---|
 | `service_event_id` | — | string | SHA-256 hash (see above); only fully identical rows are deduplicated | — |
 | `vehicle_id` | `car_id` | string | trim; renamed to match `vehicle_listings` | — |
-| `service_date` | `service_date` | date | `try_cast` to date; must be ≥ 1950-01-01 and ≤ today | `unparsed_service_date`, `invalid_service_date` |
+| `service_date` | `service_date` | date | `try_cast` to date; must be ≥ 1950-01-01 and ≤ `ingestion_date` | `unparsed_service_date`, `invalid_service_date` |
 | `odometer_km` | `odometer_km` | int | must be ≥ 0 and ≤ 2,000,000 | `invalid_odometer_km` |
 | `event_type` | `event_type` | string | upper (MAINTENANCE / INSPECTION / REPAIR / UNKNOWN) | — |
 | `service_type` | `service_type_raw` | string | upper snake case (`Oil Change` → `OIL_CHANGE`) | — |

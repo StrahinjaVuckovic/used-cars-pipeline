@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 03 – Silver: service_events
+# MAGIC # 04 – Silver: service_events
 # MAGIC
 # MAGIC Reads ServiceBook from one Bronze ingestion partition, cleans and standardizes it and overwrites
 # MAGIC the Delta table stored at `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/service_events`
@@ -155,11 +155,14 @@ for flag_column in FLAG_COLUMNS:
 df = normalize_case(df, UPPER_CASE_COLUMNS, "upper")
 
 # Validation: invalid values -> null + DQ issue (rows are kept).
+# "In the future" means after the Bronze ingestion date, never after the run date: the same Bronze input must
+# give the same Silver output on any day (idempotent re-runs and backfills). A service cannot happen after
+# the file that records it was delivered.
 df = add_issue_flag(df, F.col("service_date_raw").isNotNull() & F.col("service_date").isNull(), "unparsed_service_date")
 df = flag_and_nullify(
     df,
     "service_date",
-    (F.col("service_date") < F.lit(MIN_SERVICE_DATE).cast("date")) | (F.col("service_date") > F.current_date()),
+    (F.col("service_date") < F.lit(MIN_SERVICE_DATE).cast("date")) | (F.col("service_date") > F.to_date(F.lit(partition_date))),
     "invalid_service_date",
 )
 df = flag_and_nullify(
@@ -258,4 +261,4 @@ if delta_table_exists(listings_path):
     total = service_vehicles.count()
     print(f"{matched} of {total} service-book vehicles ({100 * matched / max(total, 1):.2f}%) exist in {listings_path}")
 else:
-    print(f"No Delta table at {listings_path} yet – run 02_silver_vehicle_listings first to see coverage.")
+    print(f"No Delta table at {listings_path} yet – run 03_silver_vehicle_listings first to see coverage.")

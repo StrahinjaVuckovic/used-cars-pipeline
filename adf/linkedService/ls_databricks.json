@@ -1,0 +1,13 @@
+{
+    "name": "ls_databricks",
+    "properties": {
+        "annotations": [],
+        "type": "AzureDatabricks",
+        "typeProperties": {
+            "domain": "https://adb-7405610173970689.9.azuredatabricks.net",
+            "authentication": "MSI",
+            "workspaceResourceId": "/subscriptions/53ccbc52-7450-4424-b821-e0bf1819b418/resourceGroups/rg-learn-Strahinja-Vuckovic/providers/Microsoft.Databricks/workspaces/dbw-used-cars-strahinja",
+            "existingClusterId": "1102-161746-o0vfiwmq"
+        }
+    }
+}

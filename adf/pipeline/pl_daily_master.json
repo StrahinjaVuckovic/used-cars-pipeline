@@ -1,0 +1,97 @@
+{
+    "name": "pl_daily_master",
+    "properties": {
+        "activities": [
+            {
+                "name": "ingest_bronze",
+                "type": "ExecutePipeline",
+                "dependsOn": [],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_ingest_bronze_sources",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true
+                }
+            },
+            {
+                "name": "silver_vehicle_listings",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "ingest_bronze",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_silver_vehicle_listings",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "ingestion_date": "@pipeline().parameters.ingestion_date",
+                        "dev_mode": {
+                            "value": "@pipeline().parameters.dev_mode",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "silver_service_events",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "silver_vehicle_listings",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_silver_service_events",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "ingestion_date": {
+                            "value": "@pipeline().parameters.ingestion_date",
+                            "type": "Expression"
+                        },
+                        "dev_mode": {
+                            "value": "@pipeline().parameters.dev_mode",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "ingestion_date": {
+                "type": "string",
+                "defaultValue": "latest"
+            },
+            "dev_mode": {
+                "type": "string",
+                "defaultValue": "false"
+            }
+        },
+        "annotations": []
+    }
+}

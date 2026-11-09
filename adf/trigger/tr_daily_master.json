@@ -1,0 +1,36 @@
+{
+    "name": "tr_daily_master",
+    "properties": {
+        "annotations": [],
+        "runtimeState": "Stopped",
+        "pipelines": [
+            {
+                "pipelineReference": {
+                    "referenceName": "pl_daily_master",
+                    "type": "PipelineReference"
+                },
+                "parameters": {
+                    "ingestion_date": "latest",
+                    "dev_mode": "false"
+                }
+            }
+        ],
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+            "recurrence": {
+                "frequency": "Day",
+                "interval": 1,
+                "startTime": "2026-11-10T13:32:00",
+                "timeZone": "Central Europe Standard Time",
+                "schedule": {
+                    "minutes": [
+                        0
+                    ],
+                    "hours": [
+                        2
+                    ]
+                }
+            }
+        }
+    }
+}

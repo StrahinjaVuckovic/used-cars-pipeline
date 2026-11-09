@@ -1,38 +1,32 @@
-# Databricks Job "silver_daily": the Silver layer as a pipeline.
+# Databricks Job "silver_vehicle_listings": the Silver pipeline of the four vehicle listing sources.
 #
-# Exported from the Databricks UI ("View as code", Databricks Asset Bundle format) after a successful full run
-# on 2026-11-06 (Bronze ingestion_date=2026-11-05). One change to the export: the notebook paths are relative
-# to this file instead of the personal workspace Git folder
-# (/Workspace/Users/<user>/used-cars-pipeline/notebooks/...), so the file contains no user name and can be
-# deployed with `databricks bundle deploy` from the repository.
+# Exported from the Databricks UI ("View as code", Databricks Asset Bundle format). Earlier name: silver_daily
+# (same Job ID); the service_events task moved to the ADF pipeline pl_silver_service_events, because the
+# mentor wants the service book run through ADF. One change to the export: the notebook paths are relative to
+# this file instead of the personal workspace Git folder (/Workspace/Users/<user>/used-cars-pipeline/notebooks/...),
+# so the file contains no user name and can be deployed with `databricks bundle deploy` from the repository.
 #
 # Task graph:
-#   validate_landing_and_bronze (01)
+#   validate_landing_and_bronze (01, sources=vehicle_listings: 4 vehicle sources + brand lookup)
 #    ├─ stage_first_source  (02) ┐
 #    ├─ stage_second_source (02) ├─► vehicle_listings (03)
 #    ├─ stage_third_source  (02) │
-#    ├─ stage_fourth_source (02) ┘
-#    └─ service_events (04)
+#    └─ stage_fourth_source (02) ┘
 #
-# Job parameters are passed to every notebook task as widgets of the same name.
-# The cluster id is the existing all-purpose cluster used-cars-cluster (not a secret). No schedule yet: runs
-# are started manually; the daily trigger comes with the ADF orchestration.
+# Job parameters are passed to every notebook task as widgets of the same name; a notebook without such a
+# widget ignores it (only 01 reads `sources`). The UI does not allow task-level parameters next to job
+# parameters, so `sources` is a job parameter: it describes the whole Job.
+# The cluster id is the existing all-purpose cluster used-cars-cluster (not a secret). No schedule here: the
+# Job is started by the ADF pipeline pl_daily_master (see documentation/orchestration.md).
 
 resources:
   jobs:
-    silver_daily:
-      name: silver_daily
+    silver_vehicle_listings:
+      name: silver_vehicle_listings
       tasks:
         - task_key: validate_landing_and_bronze
           notebook_task:
             notebook_path: ../notebooks/01_validate_landing_and_bronze
-          existing_cluster_id: 1102-161746-o0vfiwmq
-
-        - task_key: service_events
-          depends_on:
-            - task_key: validate_landing_and_bronze
-          notebook_task:
-            notebook_path: ../notebooks/04_silver_service_events
           existing_cluster_id: 1102-161746-o0vfiwmq
 
         - task_key: stage_first_source
@@ -85,3 +79,5 @@ resources:
           default: "false"
         - name: ingestion_date
           default: latest
+        - name: sources
+          default: vehicle_listings

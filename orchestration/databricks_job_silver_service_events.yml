@@ -1,0 +1,45 @@
+# Databricks Job "silver_service_events": the Silver pipeline of the service book.
+#
+# The mentor wants the service book run through ADF: the ADF pipeline pl_silver_service_events starts this Job
+# with a Databricks Job activity and waits for it (see documentation/orchestration.md). It is a Job and not two
+# ADF Notebook activities because used-cars-cluster is a dedicated (single user) cluster: a Notebook activity
+# runs as the ADF managed identity and is rejected, while a Job runs as its owner.
+#
+# Exported from the Databricks UI ("View as code", Databricks Asset Bundle format). One change to the export:
+# the notebook paths are relative to this file instead of the personal workspace Git folder
+# (/Workspace/Users/<user>/used-cars-pipeline/notebooks/...), so the file contains no user name.
+#
+# Task graph:
+#   validate_landing_and_bronze (01, sources=service_book) ─► service_events (04)
+#
+# Job parameters reach every notebook task as widgets; `sources` is read only by 01.
+# The cluster id is the existing all-purpose cluster used-cars-cluster (not a secret).
+
+resources:
+  jobs:
+    silver_service_events:
+      name: silver_service_events
+      tasks:
+        - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/01_validate_landing_and_bronze
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: service_events
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/04_silver_service_events
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+      # A run started while another is active waits in the queue instead of overwriting the same table.
+      queue:
+        enabled: true
+
+      parameters:
+        - name: ingestion_date
+          default: latest
+        - name: dev_mode
+          default: "false"
+        - name: sources
+          default: service_book

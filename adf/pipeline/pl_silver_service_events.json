@@ -1,0 +1,48 @@
+{
+    "name": "pl_silver_service_events",
+    "properties": {
+        "activities": [
+            {
+                "name": "silver_service_events",
+                "type": "DatabricksJob",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "jobId": "1000309404951239",
+                    "jobParameters": {
+                        "ingestion_date": {
+                            "value": "@pipeline().parameters.ingestion_date",
+                            "type": "Expression"
+                        },
+                        "dev_mode": {
+                            "value": "@pipeline().parameters.dev_mode",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            }
+        ],
+        "parameters": {
+            "ingestion_date": {
+                "type": "string",
+                "defaultValue": "latest"
+            },
+            "dev_mode": {
+                "type": "string",
+                "defaultValue": "false"
+            }
+        },
+        "annotations": []
+    }
+}

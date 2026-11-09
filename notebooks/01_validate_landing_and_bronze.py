@@ -9,6 +9,13 @@
 # MAGIC
 # MAGIC For every source it shows the landing files and the latest Bronze partition, and checks that the latest
 # MAGIC Bronze copy has the same total size as the landing files (a complete copy). Nothing is written.
+# MAGIC
+# MAGIC **Widgets**
+# MAGIC - `sources`: which sources to check, so every pipeline checks only its own input:
+# MAGIC   - `vehicle_listings`: the four vehicle sources and the brand lookup (first task of the Databricks Job
+# MAGIC     `silver_vehicle_listings`; the lookup is read by `03_silver_vehicle_listings`);
+# MAGIC   - `service_book`: ServiceBook (first notebook of the ADF pipeline `pl_silver_service_events`);
+# MAGIC   - `all` (default): every source, for a manual check.
 
 # COMMAND ----------
 
@@ -16,14 +23,26 @@
 
 # COMMAND ----------
 
-# Every source folder, in the same order as the ADF copy activities. Landing and Bronze use the same names.
-SOURCE_FOLDERS = [
-    *[source["folder"] for source in VEHICLE_SOURCES.values()],
-    SERVICE_BOOK_SOURCE["folder"],
-    LOOKUP_SOURCE["folder"],
-]
+VEHICLE_FOLDERS = [source["folder"] for source in VEHICLE_SOURCES.values()]
+
+# Source folders per pipeline, in the same order as the ADF copy activities. Landing and Bronze use the same names.
+SOURCE_GROUPS = {
+    "all": [*VEHICLE_FOLDERS, SERVICE_BOOK_SOURCE["folder"], LOOKUP_SOURCE["folder"]],
+    "vehicle_listings": [*VEHICLE_FOLDERS, LOOKUP_SOURCE["folder"]],
+    "service_book": [SERVICE_BOOK_SOURCE["folder"]],
+}
+
+dbutils.widgets.dropdown("sources", "all", list(SOURCE_GROUPS))
+SELECTED_SOURCES = dbutils.widgets.get("sources").strip()
+assert SELECTED_SOURCES in SOURCE_GROUPS, (
+    f"Unknown sources '{SELECTED_SOURCES}', expected one of {list(SOURCE_GROUPS)}"
+)
+
+SOURCE_FOLDERS = SOURCE_GROUPS[SELECTED_SOURCES]
 # Sources without a date partition in Bronze (static reference data).
 UNPARTITIONED_FOLDERS = [LOOKUP_SOURCE["folder"]]
+
+print(f"sources={SELECTED_SOURCES}: {SOURCE_FOLDERS}")
 
 # COMMAND ----------
 

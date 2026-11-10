@@ -92,8 +92,8 @@ def bronze_sample(spark, tmp_path_factory) -> Path:
         SAMPLE_ROWS + 1,
     )
 
-    # The lookup is small and static (no date partition): copy the whole file.
-    lookup = bronze / "Lookup"
+    # The lookup is small: copy the whole file (all 23,848 rows) into its partition like every other source.
+    lookup = _partition(bronze, "Lookup")
     lookup.mkdir(parents=True)
     shutil.copyfile(DATA_DIR / "model_to_brand_lookup.csv", lookup / "model_to_brand_lookup.csv")
 

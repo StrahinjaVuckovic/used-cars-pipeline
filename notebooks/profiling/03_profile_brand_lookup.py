@@ -9,8 +9,8 @@
 # MAGIC Not part of the daily pipeline.
 # MAGIC
 # MAGIC **Widgets**
-# MAGIC - `ingestion_date`: `latest` (default) or a `YYYY-MM-DD` Bronze partition of the vehicle sources.
-# MAGIC   The lookup itself is static and has no date partition (`bronze/Lookup/`).
+# MAGIC - `ingestion_date`: `latest` (default) or a `YYYY-MM-DD` Bronze partition, used for the lookup
+# MAGIC   (`bronze/Lookup/ingestion_date=.../`) and for the vehicle sources.
 
 # COMMAND ----------
 
@@ -31,7 +31,8 @@ import re
 dbutils.widgets.text("ingestion_date", "latest")
 INGESTION_DATE = dbutils.widgets.get("ingestion_date").strip()
 
-LOOKUP_PATH = f"{BRONZE_PATH}/{LOOKUP_SOURCE['folder']}"
+# One partition only: reading the Lookup/ folder itself would read every ingestion day at once.
+LOOKUP_PATH, _ = get_ingestion_path(LOOKUP_SOURCE["folder"], INGESTION_DATE)
 
 
 def normalize_model(column: Column) -> Column:
@@ -192,8 +193,8 @@ matched_listings.unpersist()
 # MAGIC %md
 # MAGIC ## Findings → decisions in Silver task 3
 # MAGIC
-# MAGIC Results on the full data of the `2026-11-03` ingestion. Implemented in `03_silver_vehicle_listings`
-# MAGIC (`clean_brand_lookup`, `add_manufacturer`):
+# MAGIC Results on the full data of the `2026-11-03` ingestion. Implemented in `02_silver_brand_lookup`
+# MAGIC (`clean_brand_lookup`) and `03_silver_vehicle_listings` (`add_manufacturer`):
 # MAGIC
 # MAGIC | Finding | Decision |
 # MAGIC |---|---|

@@ -2,7 +2,8 @@
 # MAGIC %md
 # MAGIC # Vehicle listings – shared cleaning code
 # MAGIC
-# MAGIC Run from the per-source Silver notebooks (`02_silver_stage_<source>_source`) after `00_config` and
+# MAGIC Run from the vehicle Silver notebooks (`02_silver_stage_<source>_source`, `02_silver_brand_lookup`, `03`)
+# MAGIC after `00_config` and
 # MAGIC `utils/silver_transformations` (`%run` paths are relative to the calling notebook):
 # MAGIC
 # MAGIC ```
@@ -195,6 +196,11 @@ def stage_table_path(source_system: str, dev_mode: bool) -> str:
     """Silver path of the cleaned table of one source, e.g. .../vehicle_listings_stage/first."""
     folder = "vehicle_listings_stage_dev" if dev_mode else "vehicle_listings_stage"
     return f"{SILVER_PATH}/{folder}/{source_system.lower()}"
+
+
+def brand_lookup_path(dev_mode: bool) -> str:
+    """Silver path of the cleaned brand lookup (written by 02_silver_brand_lookup, read by 03)."""
+    return f"{SILVER_PATH}/{'brand_lookup_dev' if dev_mode else 'brand_lookup'}"
 
 
 def check_vehicle_listings(df: DataFrame, expected_columns: list, table_name: str) -> int:

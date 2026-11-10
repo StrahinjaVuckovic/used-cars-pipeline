@@ -47,7 +47,7 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
 
 | Job | Tasks | Definition |
 |---|---|---|
-| `silver_vehicle_listings` | `validate_landing_and_bronze` (sources=vehicle_listings) → 4 × `stage_<source>_source` in parallel → `vehicle_listings` | `orchestration/databricks_job_silver_vehicle_listings.yml` |
+| `silver_vehicle_listings` | `validate_landing_and_bronze` (sources=vehicle_listings) → 4 × `stage_<source>_source` and `brand_lookup` in parallel → `vehicle_listings` | `orchestration/databricks_job_silver_vehicle_listings.yml` |
 | `silver_service_events` | `validate_landing_and_bronze` (sources=service_book) → `service_events` | `orchestration/databricks_job_silver_service_events.yml` |
 
 - Job parameters (`ingestion_date`, `dev_mode`, `sources`) reach every notebook task as widgets; a notebook

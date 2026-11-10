@@ -9,9 +9,10 @@
 # Task graph:
 #   validate_landing_and_bronze (01, sources=vehicle_listings: 4 vehicle sources + brand lookup)
 #    ├─ stage_first_source  (02) ┐
-#    ├─ stage_second_source (02) ├─► vehicle_listings (03)
-#    ├─ stage_third_source  (02) │
-#    └─ stage_fourth_source (02) ┘
+#    ├─ stage_second_source (02) │
+#    ├─ stage_third_source  (02) ├─► vehicle_listings (03)
+#    ├─ stage_fourth_source (02) │
+#    └─ brand_lookup        (02) ┘
 #
 # Job parameters are passed to every notebook task as widgets of the same name; a notebook without such a
 # widget ignores it (only 01 reads `sources`). The UI does not allow task-level parameters next to job
@@ -57,7 +58,14 @@ resources:
             notebook_path: ../notebooks/02_silver_stage_fourth_source
           existing_cluster_id: 1102-161746-o0vfiwmq
 
-        # Runs only when all four source tasks succeeded (default run_if: ALL_SUCCESS),
+        - task_key: brand_lookup
+          depends_on:
+            - task_key: validate_landing_and_bronze
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_brand_lookup
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        # Runs only when all four source tasks and the brand lookup succeeded (default run_if: ALL_SUCCESS),
         # so a failed source never produces an incomplete vehicle_listings table.
         - task_key: vehicle_listings
           depends_on:
@@ -65,6 +73,7 @@ resources:
             - task_key: stage_second_source
             - task_key: stage_third_source
             - task_key: stage_fourth_source
+            - task_key: brand_lookup
           notebook_task:
             notebook_path: ../notebooks/03_silver_vehicle_listings
           existing_cluster_id: 1102-161746-o0vfiwmq

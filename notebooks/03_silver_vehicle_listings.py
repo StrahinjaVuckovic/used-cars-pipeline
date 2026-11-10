@@ -3,17 +3,20 @@
 # MAGIC # 03 – Silver: vehicle_listings
 # MAGIC
 # MAGIC Combines the four cleaned vehicle sources (stage tables written by `02_silver_stage_<source>_source`)
-# MAGIC into one dataset, maps every listing to its manufacturer and overwrites the Delta table stored at
+# MAGIC into one dataset, maps every listing to its manufacturer with the cleaned brand lookup (`brand_lookup`,
+# MAGIC written by `02_silver_brand_lookup`) and overwrites the Delta table stored at
 # MAGIC `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings` (path-based, see 00_config).
 # MAGIC
-# MAGIC In the pipeline this task runs after the four source tasks. It never reads the source files itself.
+# MAGIC In the pipeline this task runs after the four source tasks and the brand lookup task. It never reads the
+# MAGIC Bronze files itself.
 # MAGIC
 # MAGIC Data model and rules: `documentation/silver_data_model.md`.
 # MAGIC
 # MAGIC **Widgets**
-# MAGIC - `ingestion_date`: `latest` (default) accepts the stage tables as they are; a `YYYY-MM-DD` date also
-# MAGIC   checks that every stage table was built from that Bronze partition.
-# MAGIC - `dev_mode`: `true` reads the `vehicle_listings_stage_dev` tables and writes to `vehicle_listings_dev`.
+# MAGIC - `ingestion_date`: `latest` (default) accepts the input tables as they are; a `YYYY-MM-DD` date also
+# MAGIC   checks that every stage table and the brand lookup were built from that Bronze partition.
+# MAGIC - `dev_mode`: `true` reads the `vehicle_listings_stage_dev` / `brand_lookup_dev` tables and writes to
+# MAGIC   `vehicle_listings_dev`.
 
 # COMMAND ----------
 
@@ -57,33 +60,14 @@ print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PAT
 # MAGIC ## Brand mapping functions (model → manufacturer)
 # MAGIC
 # MAGIC Rules come from `notebooks/profiling/03_profile_brand_lookup.py`:
-# MAGIC - The lookup is normalized like `model_normalized` (trim, single spaces, lower case). This removes the
-# MAGIC   91 Title Case copies of existing models.
-# MAGIC - A model that maps to more than one manufacturer (`astra` → saturn / opel) is removed from the lookup:
-# MAGIC   no arbitrary pick.
+# MAGIC - The lookup is cleaned by `02_silver_brand_lookup` (normalized like `model_normalized`, one manufacturer
+# MAGIC   per model, conflicting models such as `astra` removed). Listings join it on `model_normalized`.
 # MAGIC - Listings whose model is not in the lookup get the manufacturer from the listing URL when the URL slug
 # MAGIC   contains a known manufacturer (Craigslist URLs look like `.../d/city-2018-cadillac-xt5-crossover/...`).
 # MAGIC - `manufacturer_source` says where the value came from: `lookup`, `listing_url` or null (unknown).
 # MAGIC   An unknown manufacturer is missing data, not an invalid value, so it is not a DQ issue.
 
 # COMMAND ----------
-
-
-def clean_brand_lookup(raw_lookup_df: DataFrame) -> DataFrame:
-    """One row per normalized model with exactly one manufacturer (conflicting models are removed)."""
-    lookup_df = (
-        standardize_nulls(raw_lookup_df.select("model", "manufacturer"))
-        .select(
-            normalize_model(F.col("model")).alias("model_normalized"),
-            F.lower(F.col("manufacturer")).alias("manufacturer"),
-        )
-        .dropna()
-        .distinct()
-    )
-    unambiguous = (
-        lookup_df.groupBy("model_normalized").agg(F.count("*").alias("manufacturers")).filter("manufacturers = 1")
-    )
-    return lookup_df.join(unambiguous.select("model_normalized"), "model_normalized", "left_semi")
 
 
 def manufacturer_from_url(url: Column, manufacturers: list) -> Column:
@@ -155,6 +139,30 @@ print(f"All stage tables come from ingestion_date={stage_ingestion_date}")
 
 # COMMAND ----------
 
+# MAGIC %md ## Read the brand lookup
+
+# COMMAND ----------
+
+lookup_path = brand_lookup_path(DEV_MODE)
+assert delta_table_exists(lookup_path), f"No brand lookup at {lookup_path}: run 02_silver_brand_lookup first"
+
+lookup_table_df = read_delta_table(lookup_path)
+lookup_dates = sorted(str(row.ingestion_date) for row in lookup_table_df.select("ingestion_date").distinct().collect())
+# The lookup must come from the same Bronze ingestion as the listings (same ADF copy run).
+assert lookup_dates == [stage_ingestion_date], (
+    f"Brand lookup was built from ingestion_date={', '.join(lookup_dates)}, the stage tables from "
+    f"{stage_ingestion_date}. Re-run 02_silver_brand_lookup for the same ingestion_date."
+)
+brand_lookup_df = lookup_table_df.select("model_normalized", "manufacturer").cache()
+# Checked again here: a duplicate model would multiply listings in the join.
+assert_unique(brand_lookup_df, ["model_normalized"], "brand lookup")
+print(
+    f"Brand lookup: {brand_lookup_df.count()} models, "
+    f"{brand_lookup_df.select('manufacturer').distinct().count()} manufacturers ({lookup_path})"
+)
+
+# COMMAND ----------
+
 # MAGIC %md ## Combine the four sources into one dataset
 
 # COMMAND ----------
@@ -166,14 +174,6 @@ vehicle_listings_df = reduce(DataFrame.unionByName, stage_tables.values())
 # MAGIC %md ## Brand mapping
 
 # COMMAND ----------
-
-lookup_path = f"{BRONZE_PATH}/{LOOKUP_SOURCE['folder']}"
-brand_lookup_df = clean_brand_lookup(read_bronze_files(lookup_path, LOOKUP_SOURCE["format"])).cache()
-assert_unique(brand_lookup_df, ["model_normalized"], "brand lookup")
-print(
-    f"Brand lookup: {brand_lookup_df.count()} models, "
-    f"{brand_lookup_df.select('manufacturer').distinct().count()} manufacturers ({lookup_path})"
-)
 
 vehicle_listings_df = add_manufacturer(vehicle_listings_df, brand_lookup_df).select(*VEHICLE_LISTINGS_COLUMNS)
 

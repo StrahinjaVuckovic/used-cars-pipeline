@@ -1,7 +1,7 @@
 """
 Tests for the vehicle listings pipeline: the shared cleaning code (notebooks/utils/vehicle_listings_cleaning.py),
 the four per-source stage notebooks (02_silver_stage_<source>_source.py) and the union + brand mapping notebook
-(03_silver_vehicle_listings.py).
+(03_silver_vehicle_listings.py). The brand lookup notebook itself is tested in test_brand_lookup.py.
 """
 
 import csv
@@ -18,6 +18,7 @@ from notebook_utils import load_config_and_utils, run_notebook, run_notebook_cel
 
 CLEANING_UTILS = "utils/vehicle_listings_cleaning.py"
 LISTINGS_NOTEBOOK = "03_silver_vehicle_listings.py"
+BRAND_LOOKUP_NOTEBOOK = "02_silver_brand_lookup.py"
 SOURCES = ["First", "Second", "Third", "Fourth"]
 
 
@@ -68,14 +69,20 @@ def run_stage(spark, bronze: Path, silver: Path, source_system: str, dev_mode: s
     return run_notebook(stage_notebook(source_system), vehicle_namespace(spark, bronze, silver, dev_mode))
 
 
+def run_brand_lookup(spark, bronze: Path, silver: Path, dev_mode: str = "false") -> dict:
+    return run_notebook(BRAND_LOOKUP_NOTEBOOK, vehicle_namespace(spark, bronze, silver, dev_mode))
+
+
 def run_listings(spark, bronze: Path, silver: Path, dev_mode: str = "false", ingestion_date: str = "latest") -> dict:
     return run_notebook(LISTINGS_NOTEBOOK, vehicle_namespace(spark, bronze, silver, dev_mode, ingestion_date))
 
 
 def run_listings_pipeline(spark, bronze: Path, silver: Path, dev_mode: str = "false") -> dict:
-    """The four stage notebooks, then the union notebook (like the Databricks Job). Returns the 03 namespace."""
+    """The four stage notebooks and the brand lookup, then the union notebook (like the Databricks Job).
+    Returns the 03 namespace."""
     for source_system in SOURCES:
         run_stage(spark, bronze, silver, source_system, dev_mode)
+    run_brand_lookup(spark, bronze, silver, dev_mode)
     return run_listings(spark, bronze, silver, dev_mode)
 
 EXPECTED_DTYPES = {
@@ -101,7 +108,14 @@ def nb(spark, tmp_path_factory):
     namespace = vehicle_namespace(
         spark, tmp_path_factory.mktemp("unused-bronze"), tmp_path_factory.mktemp("unused-silver")
     )
-    return run_notebook_cells_until(LISTINGS_NOTEBOOK, namespace, "## Read the four stage tables")
+    run_notebook_cells_until(LISTINGS_NOTEBOOK, namespace, "## Read the four stage tables")
+    # clean_brand_lookup lives in the brand lookup notebook; the brand mapping tests need a cleaned lookup.
+    lookup_namespace = vehicle_namespace(
+        spark, tmp_path_factory.mktemp("unused-bronze"), tmp_path_factory.mktemp("unused-silver")
+    )
+    run_notebook_cells_until(BRAND_LOOKUP_NOTEBOOK, lookup_namespace, "## Read Bronze and clean")
+    namespace["clean_brand_lookup"] = lookup_namespace["clean_brand_lookup"]
+    return namespace
 
 
 def raw_row(**overrides) -> dict:
@@ -316,11 +330,6 @@ def listings(spark, rows):
     return spark.createDataFrame(rows, "vehicle_id STRING, model_normalized STRING, listing_url STRING")
 
 
-def test_clean_brand_lookup_normalizes_deduplicates_and_drops_conflicts(spark, nb):
-    lookup = {r.model_normalized: r.manufacturer for r in brand_lookup(spark, nb).collect()}
-    assert lookup == {"tacoma": "toyota", "silverado 1500": "chevrolet", "range rover": "land rover"}
-
-
 def test_add_manufacturer_lookup_then_url_then_null(spark, nb):
     df = listings(spark, [
         ("v1", "tacoma", "https://x.craigslist.org/cto/d/city-2015-toyota-tacoma/1.html"),
@@ -396,6 +405,7 @@ def test_full_pipeline_run(spark, bronze_sample, silver_dir, catalog_untouched):
     assert table.columns == namespace["VEHICLE_LISTINGS_COLUMNS"]
     assert dict(table.dtypes) == EXPECTED_DTYPES
     assert (silver_dir / "vehicle_listings" / "_delta_log").is_dir()
+    assert (silver_dir / "brand_lookup" / "_delta_log").is_dir()
     detail = spark.sql(f"DESCRIBE DETAIL delta.`{silver_dir / 'vehicle_listings'}`").first()
     assert detail.numFiles == namespace["OUTPUT_FILES"]  # no small-files problem
     assert namespace["stage_ingestion_date"] == INGESTION_DATE
@@ -450,6 +460,34 @@ def test_listings_notebook_checks_the_requested_ingestion_date(spark, bronze_sam
         run_listings(spark, bronze_sample, silver, ingestion_date="2026-11-05")
 
 
+def run_all_stages(spark, bronze, silver):
+    for source_system in SOURCES:
+        run_stage(spark, bronze, silver, source_system)
+
+
+def test_listings_notebook_needs_the_brand_lookup(spark, bronze_sample, tmp_path, catalog_untouched):
+    silver = tmp_path / "silver"
+    run_all_stages(spark, bronze_sample, silver)
+    with pytest.raises(AssertionError, match="No brand lookup at .* run 02_silver_brand_lookup first"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
+def test_listings_notebook_rejects_a_brand_lookup_from_another_ingestion(
+    spark, bronze_sample, tmp_path, catalog_untouched
+):
+    silver = tmp_path / "silver"
+    run_all_stages(spark, bronze_sample, silver)
+    run_brand_lookup(spark, bronze_sample, silver)
+    lookup = str(silver / "brand_lookup")
+    older = spark.read.format("delta").load(lookup).withColumn("ingestion_date", F.to_date(F.lit("2026-11-02")))
+    older.write.format("delta").mode("overwrite").save(lookup)
+
+    with pytest.raises(AssertionError, match=f"Brand lookup was built from ingestion_date=2026-11-02, the stage tables from {INGESTION_DATE}"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
 def test_full_pipeline_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
     """An impossible date in Bronze must not stop the pipeline: the row is written and flagged (option b)."""
     bronze = copy_bronze_and_edit_first_row(
@@ -471,7 +509,9 @@ def test_dev_mode_writes_to_dev_tables(spark, bronze_sample, silver_dir, catalog
     run_listings_pipeline(spark, bronze_sample, silver_dir, dev_mode="true")
     assert (silver_dir / "vehicle_listings_stage_dev" / "first" / "_delta_log").is_dir()
     assert (silver_dir / "vehicle_listings_dev" / "_delta_log").is_dir()
+    assert (silver_dir / "brand_lookup_dev" / "_delta_log").is_dir()
     assert not (silver_dir / "vehicle_listings_stage").exists()
+    assert not (silver_dir / "brand_lookup").exists()
     assert not (silver_dir / "vehicle_listings").exists()
 
 

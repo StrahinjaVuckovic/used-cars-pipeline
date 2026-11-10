@@ -25,7 +25,7 @@ def build_storage(root, bronze_overrides=None, skip_landing=()):
         if folder not in skip_landing:
             (landing / folder).mkdir(parents=True)
             (landing / folder / file_name).write_bytes(content)
-        target = bronze / folder if folder == "Lookup" else bronze / folder / f"ingestion_date={INGESTION_DATE}"
+        target = bronze / folder / f"ingestion_date={INGESTION_DATE}"
         target.mkdir(parents=True)
         (target / file_name).write_bytes((bronze_overrides or {}).get(folder, content))
     return landing, bronze
@@ -51,8 +51,18 @@ def test_complete_copy_passes(spark, tmp_path):
     rows = {row[0]: row for row in namespace["overview"]}
     assert set(rows) == set(FILES)
     assert all(row[6] for row in rows.values())  # sizes_match
-    assert rows["Lookup"][3] == "(no partition)"
+    assert rows["Lookup"][3] == f"ingestion_date={INGESTION_DATE}"
     assert rows["ServiceBook"][3] == f"ingestion_date={INGESTION_DATE}"
+
+
+def test_lookup_without_date_partition_fails(spark, tmp_path):
+    """The old Bronze layout (file directly in Lookup/, no ingestion_date folder) is no longer accepted."""
+    landing, bronze = build_storage(tmp_path)
+    partition = bronze / "Lookup" / f"ingestion_date={INGESTION_DATE}"
+    (partition / FILES["Lookup"]).rename(bronze / "Lookup" / FILES["Lookup"])
+    partition.rmdir()
+    with pytest.raises(AssertionError, match="No Bronze copy for: \\['Lookup'\\]"):
+        run_validation(spark, tmp_path, landing, bronze, sources="vehicle_listings")
 
 
 def test_missing_landing_file_fails(spark, tmp_path):

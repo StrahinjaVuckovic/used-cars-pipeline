@@ -4,8 +4,7 @@
 # MAGIC
 # MAGIC Checks the first two storage areas before any Silver processing:
 # MAGIC - **landing** (`landing` container): where source files arrive, one folder per source;
-# MAGIC - **Bronze** (`bronze` container): ADF copies every landing file into `<Source>/ingestion_date=YYYY-MM-DD/`
-# MAGIC   (the static lookup goes to `Lookup/` without a date partition).
+# MAGIC - **Bronze** (`bronze` container): ADF copies every landing file into `<Source>/ingestion_date=YYYY-MM-DD/`.
 # MAGIC
 # MAGIC For every source it shows the landing files and the latest Bronze partition, and checks that the latest
 # MAGIC Bronze copy has the same total size as the landing files (a complete copy). Nothing is written.
@@ -13,8 +12,8 @@
 # MAGIC **Widgets**
 # MAGIC - `sources`: which sources to check, so every pipeline checks only its own input:
 # MAGIC   - `vehicle_listings`: the four vehicle sources and the brand lookup (first task of the Databricks Job
-# MAGIC     `silver_vehicle_listings`; the lookup is read by `03_silver_vehicle_listings`);
-# MAGIC   - `service_book`: ServiceBook (first notebook of the ADF pipeline `pl_silver_service_events`);
+# MAGIC     `silver_vehicle_listings`; the lookup is cleaned by `02_silver_brand_lookup`);
+# MAGIC   - `service_book`: ServiceBook (first task of the Databricks Job `silver_service_events`);
 # MAGIC   - `all` (default): every source, for a manual check.
 
 # COMMAND ----------
@@ -39,8 +38,6 @@ assert SELECTED_SOURCES in SOURCE_GROUPS, (
 )
 
 SOURCE_FOLDERS = SOURCE_GROUPS[SELECTED_SOURCES]
-# Sources without a date partition in Bronze (static reference data).
-UNPARTITIONED_FOLDERS = [LOOKUP_SOURCE["folder"]]
 
 print(f"sources={SELECTED_SOURCES}: {SOURCE_FOLDERS}")
 
@@ -61,8 +58,6 @@ def size_mb(files: list) -> float:
 
 def latest_bronze_files(folder: str) -> tuple:
     """(partition label, files) of the latest Bronze copy of a source."""
-    if folder in UNPARTITIONED_FOLDERS:
-        return "(no partition)", list_files(f"{BRONZE_PATH}/{folder}")
     try:
         partition_path, partition_date = get_ingestion_path(folder, "latest")
     except Exception:  # no Bronze folder or no ingestion_date partition yet
@@ -108,8 +103,6 @@ display(spark.createDataFrame(
 # COMMAND ----------
 
 for folder in SOURCE_FOLDERS:
-    if folder in UNPARTITIONED_FOLDERS:
-        continue
     try:
         partitions = sorted(i.name.rstrip("/") for i in dbutils.fs.ls(f"{BRONZE_PATH}/{folder}") if i.isDir())
     except Exception:

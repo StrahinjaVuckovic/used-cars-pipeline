@@ -6,6 +6,7 @@ keys, columns, cleaning rules and the assumptions they rely on.
 Notebooks:
 - `notebooks/02_silver_stage_first_source.py`, `..._second_source.py`, `..._third_source.py`,
   `..._fourth_source.py` → one stage table per vehicle source (`vehicle_listings_stage/<source>`)
+- `notebooks/02_silver_brand_lookup.py` → `silver.brand_lookup` (cleaned `model_to_brand_lookup.csv`)
 - `notebooks/03_silver_vehicle_listings.py` → `silver.vehicle_listings` (union of the stage tables + brand mapping)
 - `notebooks/04_silver_service_events.py` → `silver.service_events`
 
@@ -36,7 +37,8 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources),
 ## Storage and catalog
 
 - Tables are **path-based Delta tables** in the `silver` container:
-  `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings` and `.../service_events`
+  `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/vehicle_listings`, `.../brand_lookup` and
+  `.../service_events`
   (`*_dev` suffix when a notebook runs with `dev_mode=true`).
 - They are **not registered in the catalog**. The Databricks workspace uses Unity Catalog (catalog
   `dbw_used_cars_strahinja`), and registering a table on an `abfss://` path requires a Unity Catalog
@@ -75,24 +77,24 @@ notebook holds only what is specific to its source (reader options via `VEHICLE_
 notes) and its own checks and DQ report.
 
 ```
-Bronze <Source>/ingestion_date=…  ──►  02_silver_stage_<source>_source  ──►  silver/vehicle_listings_stage/<source>
-                                          (×4, independent, in parallel)               │
-Bronze Lookup/  ─────────────────────────────────────────────────────────►  03_silver_vehicle_listings
-                                                                                       ▼
-                                                                            silver/vehicle_listings
+Bronze <Source>/ingestion_date=…  ──►  02_silver_stage_<source>_source  ──►  silver/vehicle_listings_stage/<source> ─┐
+                                       (×4, independent, in parallel)                                                 │
+Bronze Lookup/ingestion_date=…    ──►  02_silver_brand_lookup           ──►  silver/brand_lookup ──────────────────────┤
+                                       (in parallel with the 4 sources)                                               ▼
+                                                                       03_silver_vehicle_listings  ──►  silver/vehicle_listings
 Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ──►  silver/service_events
 ```
 
 - **Stage tables** (`vehicle_listings_stage/first|second|third|fourth`, path-based Delta, one file each) hold one
   cleaned source in the common 36-column shape (no brand columns yet). Pipeline tasks cannot share DataFrames,
   so the result of a source task is stored for the next task. They are internal: analysts use `vehicle_listings`.
-- `03_silver_vehicle_listings` reads the four stage tables and **stops** if one is missing or if they come from
-  different ingestion dates (otherwise the table would mix two days). Then it unions them, maps the brands and
-  checks that `vehicle_id` is unique across all sources.
+- `03_silver_vehicle_listings` reads the four stage tables and the brand lookup and **stops** if one is missing
+  or if they come from different ingestion dates (otherwise the table would mix two days). Then it unions the
+  sources, maps the brands and checks that `vehicle_id` is unique across all sources.
 - The vehicle notebooks run as the Databricks Job `silver_vehicle_listings`
   (`orchestration/databricks_job_silver_vehicle_listings.yml`): `validate_landing_and_bronze` (01,
-  `sources=vehicle_listings`) first, then the four `stage_<source>_source` tasks (02) in parallel;
-  `vehicle_listings` (03) runs only when all four source tasks succeeded. The service book runs as the Job
+  `sources=vehicle_listings`) first, then the four `stage_<source>_source` tasks and `brand_lookup` (02) in
+  parallel; `vehicle_listings` (03) runs only when all five tasks succeeded. The service book runs as the Job
   `silver_service_events` (01 with `sources=service_book` → 04).
 - Both Jobs are started every day by the ADF master pipeline `pl_daily_master`, after the landing → Bronze copy,
   and `silver_service_events` runs after `silver_vehicle_listings`. Details, parameters and authentication:
@@ -155,6 +157,12 @@ Findings that shaped the model:
 ```mermaid
 erDiagram
     VEHICLE_LISTINGS ||--o{ SERVICE_EVENTS : "vehicle_id"
+    BRAND_LOOKUP |o--o{ VEHICLE_LISTINGS : "model_normalized"
+    BRAND_LOOKUP {
+        string model_normalized PK
+        string manufacturer
+        date ingestion_date
+    }
     VEHICLE_LISTINGS {
         string vehicle_id PK
         string source_system
@@ -188,8 +196,9 @@ erDiagram
     }
 ```
 
-The relationship is logical only: it is measured (coverage %) but not enforced, because some service
-events refer to cars that have no listing.
+The relationships are logical only. Service events → listings is measured (coverage %) but not enforced.
+Listings → brand lookup is used once, to fill `manufacturer`; listings whose model is not in the lookup get the
+brand from the URL or none.
 
 ---
 
@@ -253,9 +262,9 @@ removal of invalid rows (Gold).
 
 ### Brand mapping (model → manufacturer)
 
-Based on `notebooks/profiling/03_profile_brand_lookup.py`; implemented in `03_silver_vehicle_listings`
-(`clean_brand_lookup`, `add_manufacturer`). The lookup is a reference used for enrichment only; it is not
-stored as a separate Silver table (Gold `dim_brand_model` can be built from `vehicle_listings`).
+Based on `notebooks/profiling/03_profile_brand_lookup.py`. Steps 1–2 are done by `02_silver_brand_lookup`
+(`clean_brand_lookup`, stored as [`silver.brand_lookup`](#silverbrand_lookup)); steps 3–5 by
+`03_silver_vehicle_listings` (`add_manufacturer`).
 
 1. **Clean the lookup:** model normalized like `model_normalized`, manufacturer lower-cased, duplicates removed.
    This removes the 91 Title Case copies (`Tacoma, Toyota` next to `tacoma, toyota`) → 45 manufacturers.
@@ -271,7 +280,38 @@ stored as a separate Silver table (Gold `dim_brand_model` can be built from `veh
 5. **Otherwise null** (12,147 listings = 2.84%). Brands missing from the lookup (scion, freightliner, hummer, ...) stay unknown.
    An unknown manufacturer is missing data, not an invalid value, so it is not a DQ issue.
 
-The notebook checks that the cleaned lookup key is unique and that the row count is unchanged after the join.
+`03` checks that the lookup comes from the same ingestion as the stage tables, that its key is unique and that
+the row count is unchanged after the join.
+
+---
+
+## `silver.brand_lookup`
+
+**Purpose:** the cleaned brand reference (`model_to_brand_lookup.csv`): one manufacturer per normalized model.
+Used by `03_silver_vehicle_listings` for the brand mapping and later by Gold (`dim_brand_model`).
+
+**Grain:** one row per `model_normalized`. **Key:** `model_normalized` (unique, checked before writing).
+**Rows:** 23,756 models, 44 manufacturers (raw file: 23,848 rows). **Notebook:** `02_silver_brand_lookup`.
+
+| Column | Source | Type | Rule |
+|---|---|---|---|
+| `model_normalized` | `model` | string | trim, single spaces, lower case (same as in `vehicle_listings`) |
+| `manufacturer` | `manufacturer` | string | lower case |
+| `ingestion_date` | Bronze partition | date | lineage; must equal the stage tables' date in `03` |
+| `source_file_path` | Bronze file | string | lineage |
+| `silver_processed_at` | — | timestamp | lineage |
+
+- Rows without a model or manufacturer and duplicate rows after normalization (the 91 Title Case copies) are
+  removed; a model with several manufacturers (`astra`) is removed. The DQ report of the notebook shows how many
+  rows each step removed and lists the conflicting models.
+- The lookup is reference data, not a list of facts, so removed rows are not kept with `dq_issues` (unlike the
+  listings): a kept conflicting row would break the unique join key.
+- `dev_mode=true` still reads the whole lookup (a sample would leave most listings without a brand) and writes
+  `brand_lookup_dev`.
+- In Bronze the lookup has a date partition like every source (`Lookup/ingestion_date=YYYY-MM-DD/`, since
+  2026-11-10; before that ADF overwrote one file in `Lookup/`). Each day's run therefore uses that day's lookup,
+  and a backfill uses the lookup of the backfilled day. Ingestions before 2026-11-10 have no lookup partition,
+  so they can no longer be reprocessed.
 
 ---
 

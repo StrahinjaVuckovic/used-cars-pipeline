@@ -1,0 +1,30 @@
+{
+    "name": "ds_bronze_exchange_rates_sink",
+    "properties": {
+        "linkedServiceName": {
+            "referenceName": "AzureDataLakeStorage1",
+            "type": "LinkedServiceReference"
+        },
+        "parameters": {
+            "file_name": {
+                "type": "string"
+            }
+        },
+        "annotations": [],
+        "type": "Binary",
+        "typeProperties": {
+            "location": {
+                "type": "AzureBlobFSLocation",
+                "fileName": {
+                    "value": "@dataset().file_name",
+                    "type": "Expression"
+                },
+                "folderPath": {
+                    "value": "@concat('ExchangeRates/ingestion_date=', formatDateTime(utcNow(), 'yyyy-MM-dd'))",
+                    "type": "Expression"
+                },
+                "fileSystem": "bronze"
+            }
+        }
+    }
+}

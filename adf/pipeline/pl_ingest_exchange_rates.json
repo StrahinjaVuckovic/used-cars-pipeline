@@ -1,0 +1,72 @@
+{
+    "name": "pl_ingest_exchange_rates",
+    "properties": {
+        "activities": [
+            {
+                "name": "Copy_ExchangeRates",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:10:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "BinarySource",
+                        "storeSettings": {
+                            "type": "HttpReadSettings",
+                            "requestMethod": "GET"
+                        },
+                        "formatSettings": {
+                            "type": "BinaryReadSettings"
+                        }
+                    },
+                    "sink": {
+                        "type": "BinarySink",
+                        "storeSettings": {
+                            "type": "AzureBlobFSWriteSettings"
+                        }
+                    },
+                    "enableStaging": false
+                },
+                "inputs": [
+                    {
+                        "referenceName": "ds_frankfurter_rates",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "relative_url": {
+                                "value": "@if(empty(pipeline().parameters.history_from), 'v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb', concat('v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb&from=', pipeline().parameters.history_from, '&to=', pipeline().parameters.history_to))",
+                                "type": "Expression"
+                            }
+                        }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "ds_bronze_exchange_rates_sink",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "file_name": {
+                                "value": "@if(empty(pipeline().parameters.history_from), 'rates_latest.json', concat('rates_', pipeline().parameters.history_from, '_', pipeline().parameters.history_to, '.json'))",
+                                "type": "Expression"
+                            }
+                        }
+                    }
+                ]
+            }
+        ],
+        "parameters": {
+            "history_from": {
+                "type": "string"
+            },
+            "history_to": {
+                "type": "string"
+            }
+        },
+        "annotations": []
+    }
+}

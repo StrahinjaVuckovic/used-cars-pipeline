@@ -1,0 +1,41 @@
+# Databricks Job "silver_exchange_rates": exchange rate history and the priced listings view.
+#
+# Same format as databricks_job_silver_vehicle_listings.yml (Databricks Asset Bundle, "View as code" in the UI),
+# with notebook paths relative to this file instead of the personal workspace Git folder.
+#
+# Task graph:
+#   exchange_rates (05: all Bronze ExchangeRates partitions -> silver/exchange_rates)
+#    └─ vehicle_listings_priced (06: view dbw_used_cars_strahinja.silver.vw_vehicle_listings_priced)
+#
+# There is no validate task: the rates come from an API, not from landing, and 05 itself fails when Bronze has
+# no ExchangeRates partition or an invalid response. 06 also needs silver/vehicle_listings, so the ADF master
+# pipeline starts this Job after silver_vehicle_listings (and after the exchange rate copy, even when that copy
+# failed: the view then uses the last delivered rates, see documentation/orchestration.md).
+# No schedule here: the Job is started by the ADF pipeline pl_daily_master.
+
+resources:
+  jobs:
+    silver_exchange_rates:
+      name: silver_exchange_rates
+      tasks:
+        - task_key: exchange_rates
+          notebook_task:
+            notebook_path: ../notebooks/05_silver_exchange_rates
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: vehicle_listings_priced
+          depends_on:
+            - task_key: exchange_rates
+          notebook_task:
+            notebook_path: ../notebooks/06_silver_vehicle_listings_priced
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+      # A run started while another is active waits in the queue instead of running in parallel.
+      queue:
+        enabled: true
+
+      parameters:
+        - name: dev_mode
+          default: "false"
+        - name: ingestion_date
+          default: latest

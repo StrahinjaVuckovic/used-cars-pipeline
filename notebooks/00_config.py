@@ -24,6 +24,10 @@ GOLD_PATH = f"abfss://gold@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 
 # Tables are path-based Delta tables under these containers (no catalog registration yet:
 # the workspace uses Unity Catalog and has no External Location for these containers).
+# Views over those paths can be registered in Unity Catalog (verified 2026-11-10); they live in this
+# catalog and schema. None means "no Unity Catalog" (local tests): views are then session-scoped temp views.
+UC_CATALOG = "dbw_used_cars_strahinja"
+UC_SILVER_SCHEMA = "silver"
 
 # COMMAND ----------
 
@@ -66,9 +70,28 @@ VEHICLE_SOURCES = {
 SERVICE_BOOK_SOURCE = {"folder": "ServiceBook", "format": "csv"}
 LOOKUP_SOURCE = {"folder": "Lookup", "format": "csv"}
 
+# Exchange rates come from the Frankfurter API (ECB rates), copied by ADF into Bronze as the raw JSON response:
+# a JSON array of {"date", "base", "quote", "rate"} objects, so multiLine reads one row per array element.
+EXCHANGE_RATES_SOURCE = {"folder": "ExchangeRates", "format": "json", "options": {"multiLine": "true"}}
+FX_BASE_CURRENCY = "EUR"
+FX_QUOTE_CURRENCIES = ["USD", "GBP", "AUD"]
+
 INGESTION_PARTITION_PREFIX = "ingestion_date="
 
 # COMMAND ----------
+
+
+def list_ingestion_dates(source_folder: str) -> list:
+    """Sorted dates of all `ingestion_date=YYYY-MM-DD` partitions of a Bronze source (fails if there are none)."""
+    source_path = f"{BRONZE_PATH}/{source_folder}"
+    available_dates = sorted(
+        item.name.rstrip("/")[len(INGESTION_PARTITION_PREFIX):]
+        for item in dbutils.fs.ls(source_path)
+        if item.isDir() and item.name.startswith(INGESTION_PARTITION_PREFIX)
+    )
+    if not available_dates:
+        raise ValueError(f"No '{INGESTION_PARTITION_PREFIX}*' partitions found in {source_path}")
+    return available_dates
 
 
 def get_ingestion_path(source_folder: str, ingestion_date: str = "latest") -> tuple:
@@ -79,13 +102,7 @@ def get_ingestion_path(source_folder: str, ingestion_date: str = "latest") -> tu
     `ingestion_date=YYYY-MM-DD` folder is used; otherwise the requested date must exist.
     """
     source_path = f"{BRONZE_PATH}/{source_folder}"
-    available_dates = sorted(
-        item.name.rstrip("/")[len(INGESTION_PARTITION_PREFIX):]
-        for item in dbutils.fs.ls(source_path)
-        if item.isDir() and item.name.startswith(INGESTION_PARTITION_PREFIX)
-    )
-    if not available_dates:
-        raise ValueError(f"No '{INGESTION_PARTITION_PREFIX}*' partitions found in {source_path}")
+    available_dates = list_ingestion_dates(source_folder)
 
     if ingestion_date == "latest":
         selected_date = available_dates[-1]

@@ -9,6 +9,8 @@ Notebooks:
 - `notebooks/02_silver_brand_lookup.py` → `silver.brand_lookup` (cleaned `model_to_brand_lookup.csv`)
 - `notebooks/03_silver_vehicle_listings.py` → `silver.vehicle_listings` (union of the stage tables + brand mapping)
 - `notebooks/04_silver_service_events.py` → `silver.service_events`
+- `notebooks/05_silver_exchange_rates.py` → `silver.exchange_rates` (daily ECB rates from the Frankfurter API)
+- `notebooks/06_silver_vehicle_listings_priced.py` → view `silver.vw_vehicle_listings_priced` (prices in GBP/USD/AUD)
 
 Shared code: `notebooks/00_config.py` (storage access, paths, sources),
 `notebooks/utils/silver_transformations.py` (reusable cleaning functions) and
@@ -51,6 +53,10 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources),
 - Once an External Location exists for the `silver` and `gold` containers, the tables can be registered
   (`CREATE TABLE ... LOCATION`) without moving any data.
 - The names `silver.vehicle_listings` / `silver.service_events` in this document are logical names.
+- **Views can be registered**: a Unity Catalog view over the path-based tables works (tested on the cluster on
+  2026-11-10), so the priced view is the real catalog object `dbw_used_cars_strahinja.silver.vw_vehicle_listings_priced`.
+  Because it reads ``delta.`abfss://...` `` paths, it can only be queried from a session that has storage access (the
+  project cluster after `00_config`); an External Location would remove that limit.
 
 ## Load strategy and assumptions
 
@@ -83,6 +89,8 @@ Bronze Lookup/ingestion_date=…    ──►  02_silver_brand_lookup           
                                        (in parallel with the 4 sources)                                               ▼
                                                                        03_silver_vehicle_listings  ──►  silver/vehicle_listings
 Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ──►  silver/service_events
+Bronze ExchangeRates/ingestion_date=… (all) ──►  05_silver_exchange_rates  ──►  silver/exchange_rates ─┐
+                                    silver/vehicle_listings ─────────────────────────────────────────┴─► 06 ──► view vw_vehicle_listings_priced
 ```
 
 - **Stage tables** (`vehicle_listings_stage/first|second|third|fourth`, path-based Delta, one file each) hold one
@@ -163,6 +171,13 @@ Findings that shaped the model:
 erDiagram
     VEHICLE_LISTINGS ||--o{ SERVICE_EVENTS : "vehicle_id"
     BRAND_LOOKUP |o--o{ VEHICLE_LISTINGS : "model_normalized"
+    EXCHANGE_RATES }o--o{ VEHICLE_LISTINGS : "currency (latest rate_date, in the view)"
+    EXCHANGE_RATES {
+        date rate_date PK
+        string quote_currency PK
+        string base_currency
+        double rate
+    }
     BRAND_LOOKUP {
         string model_normalized PK
         string manufacturer
@@ -262,7 +277,7 @@ conversion and the Gold vehicle/listing tables.
 (Craigslist is a US platform), so the column is named `odometer` without a unit suffix.
 It will be renamed once the unit is confirmed.
 
-**Not done here:** currency conversion (Silver view, later), default values for `null`,
+**Not done here:** currency conversion (view `vw_vehicle_listings_priced`), default values for `null`,
 removal of invalid rows (Gold).
 
 ### Brand mapping (model → manufacturer)
@@ -389,10 +404,72 @@ Only rows identical in every column are removed as duplicates (none in the 2026-
 7. **Deduplication** on the table key.
 8. **Lineage columns** on every row.
 
-## Silver view (planned)
+## `silver.exchange_rates`
 
-Currency conversion will not be stored in `vehicle_listings`. A daily job will load exchange rates
-into `silver.exchange_rates`. The view `silver.vw_vehicle_listings_priced` will join each listing's
-`price` / `currency` with the latest rates to expose `price_usd`, `price_gbp` and `price_aud`.
-Because a view is computed when it is queried, new rates show up in the converted prices without
-rewriting the listings table.
+**Purpose:** the history of daily exchange rates used to convert listing prices. Silver uses the latest day
+(priced view); Gold can use the rate of each listing's `posting_date`.
+
+**Source:** the Frankfurter API (`https://api.frankfurter.dev/v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb`),
+the official European Central Bank rates. It is a public API without a key, so there is no secret to keep in Key
+Vault. `providers=ecb` keeps only the ECB rates: without it the API blends other providers and also returns weekend
+values. ADF copies the raw response into `bronze/ExchangeRates/ingestion_date=YYYY-MM-DD/` – the only Bronze source
+that does not come from `landing`:
+- `rates_latest.json`: the daily call (latest ECB day);
+- `rates_<from>_<to>.json`: a one-time history call from the first listing day to the day of the call
+  (2020-01-01 → 2026-11-10; the listings' `posting_date` covers 2020-01-01 → 2024-12-31). Ending on the day of the
+  call leaves no gap before the daily calls, and listings that arrive later with newer posting dates still find
+  their rate. The API starts the series with the last rate before `from` (2019-12-31).
+
+**Grain:** one row per `rate_date` and `quote_currency`. **Key:** (`rate_date`, `quote_currency`).
+**Notebook:** `05_silver_exchange_rates`.
+
+| Column | Source | Type | Rule |
+|---|---|---|---|
+| `rate_date` | `date` | date | ECB working day (no weekends / holidays) |
+| `base_currency` | `base` | string | always `EUR` |
+| `quote_currency` | `quote` | string | `USD`, `GBP`, `AUD` |
+| `rate` | `rate` | double | 1 EUR = `rate` × quote currency, > 0 |
+| `ingestion_date` | Bronze partition | date | lineage; the latest ingestion that delivered the row |
+| `source_file_path` | Bronze file | string | lineage |
+| `silver_processed_at` | — | timestamp | lineage |
+
+- **History, not a snapshot:** unlike the other sources, the notebook reads **every** Bronze partition (up to the
+  `ingestion_date` widget). A day that arrives more than once (a Saturday call returns Friday again, the history
+  file overlaps daily calls) is kept from the **latest ingestion**.
+- **Checks stop the run** (rates are reference data: one wrong rate makes every converted price wrong): base EUR,
+  rate > 0, every day has exactly USD, GBP and AUD, no `rate_date` after its `ingestion_date`, unique key, and an
+  error response (`{"status": 422, ...}`) is rejected.
+
+## Silver view `vw_vehicle_listings_priced`
+
+**Purpose:** the listings with their prices in **GBP, USD and AUD** at the latest exchange rates – the Silver view
+of the brief that refreshes daily with updated rates. Notebook `06_silver_vehicle_listings_priced` creates or
+replaces it on every run (`vw_vehicle_listings_priced_dev` over the `_dev` tables in dev mode).
+
+- **A view, not a table:** it stores no data and runs its query on every read. When `05` writes new rates, the
+  view returns the new prices immediately; `vehicle_listings` is never rewritten and keeps the original price
+  and currency.
+- **Columns:** all `vehicle_listings` columns, then `fx_rate_date` (the day of the rates used), `price_gbp`,
+  `price_usd`, `price_aud` (decimal(18,2)).
+- **Conversion:** all rates are relative to EUR (EUR itself = 1), so every pair goes through EUR:
+
+  `price_<target> = round(price / rate(currency) * rate(target), 2)`
+
+  Example with the rates of 2026-11-02 (AUD 1.6236, GBP 0.8343): 20,000 AUD → 20,000 / 1.6236 × 0.8343 =
+  10,277.16 GBP. A listing without price or currency gets null converted prices.
+- **Latest rate:** `fx_rate_date = max(rate_date)`, normally the previous working day (the ECB publishes around
+  16:00 CET, the pipeline runs at 02:00). The rate of the posting date is a Gold topic (more accurate for
+  analysis; the history is already in `exchange_rates`).
+- **Checks** (`06`): same row count as `vehicle_listings`; no null converted price where price and currency exist;
+  one EUR listing recomputed by hand; the rates are at most **5 days** older than the listings' `ingestion_date`
+  (weekends and Easter are normal, a week means the API copy has failed). The age is measured against
+  `ingestion_date`, not the run date, so re-runs give the same result.
+- **When the API fails:** the daily ADF pipeline still processes the listings and the service book; the view keeps
+  the last delivered rates (its `fx_rate_date` shows their age) and the master pipeline is marked failed
+  (see `documentation/orchestration.md`).
+
+## New vehicle listings
+
+New listings arrive as **files in `landing`**: ADF copies them into a new Bronze partition and the Silver Jobs
+process the new snapshot. There is no API for new listings in this data set (the source systems are files), so the
+brief's "API integration ... (and new vehicle listings)" is covered by the landing → Bronze → Silver flow.

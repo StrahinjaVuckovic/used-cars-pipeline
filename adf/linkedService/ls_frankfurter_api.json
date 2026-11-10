@@ -1,0 +1,12 @@
+{
+    "name": "ls_frankfurter_api",
+    "properties": {
+        "annotations": [],
+        "type": "HttpServer",
+        "typeProperties": {
+            "url": "https://api.frankfurter.dev/",
+            "enableServerCertificateValidation": true,
+            "authenticationType": "Anonymous"
+        }
+    }
+}

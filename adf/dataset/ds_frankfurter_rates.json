@@ -1,0 +1,25 @@
+{
+    "name": "ds_frankfurter_rates",
+    "properties": {
+        "linkedServiceName": {
+            "referenceName": "ls_frankfurter_api",
+            "type": "LinkedServiceReference"
+        },
+        "parameters": {
+            "relative_url": {
+                "type": "string"
+            }
+        },
+        "annotations": [],
+        "type": "Binary",
+        "typeProperties": {
+            "location": {
+                "type": "HttpServerLocation",
+                "relativeUrl": {
+                    "value": "@dataset().relative_url",
+                    "type": "Expression"
+                }
+            }
+        }
+    }
+}

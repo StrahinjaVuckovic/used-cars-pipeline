@@ -12,7 +12,7 @@ go through ADF.
 |---|---|
 | Daily schedule and the order of all steps | ADF (`pl_daily_master` + trigger `tr_daily_master`) |
 | Moving files landing → Bronze | ADF (`pl_ingest_bronze_sources`, Copy activities) |
-| Exchange rates API → Bronze *(planned)* | ADF (Copy activity with a REST source) |
+| Exchange rates API → Bronze | ADF (`pl_ingest_exchange_rates`, Copy activity with an HTTP source) |
 | Cleaning and combining (Silver), Gold | Databricks notebooks, grouped into Databricks Jobs |
 
 ADF never processes data itself: it starts Databricks Jobs with the **Databricks Job activity**, waits for them
@@ -43,12 +43,44 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
   `ingestion_date=YYYY-MM-DD` reprocesses one Bronze partition (backfill). Both are **String** parameters: the
   notebooks compare the widget with the text `"true"`, and an ADF Bool would arrive as `"True"`.
 
+## Target master pipeline (in progress, 2026-11-10)
+
+The mentor confirmed (2026-11-10) that the master should start the Databricks Jobs **directly** with Databricks Job
+activities: the one-activity wrapper pipelines `pl_silver_vehicle_listings` and `pl_silver_service_events` are
+removed. The ingest pipelines stay separate pipelines, because they hold ADF copy logic (six Copy activities;
+history parameters) and can be run on their own.
+
+```
+pl_daily_master
+ ├─ ingest_bronze          Execute Pipeline pl_ingest_bronze_sources
+ ├─ ingest_exchange_rates  Execute Pipeline pl_ingest_exchange_rates            (in parallel, no dependency)
+ ├─ silver_vehicle_listings  Job activity   after ingest_bronze: Succeeded
+ ├─ silver_service_events    Job activity   after silver_vehicle_listings: Succeeded
+ ├─ silver_exchange_rates    Job activity   after silver_vehicle_listings: Succeeded
+ │                                          and ingest_exchange_rates: Completed
+ └─ fx_ingest_failed         Fail activity  after ingest_exchange_rates: Failed
+```
+
+- **The exchange rate API must not stop the day.** `silver_exchange_rates` waits for the copy with the condition
+  *Completed* (succeeded or failed), so the listings, the service book and the priced view are processed even when
+  the API is down; the view then uses the last delivered rates and `06` fails only when they are more than 5 days
+  older than the listings.
+- **But the failure must be visible.** ADF decides the pipeline status from its last ("leaf") activities; a failed
+  activity whose failure is handled by a *Completed* dependency would leave the master green. The Fail activity
+  `fx_ingest_failed` runs only when the copy failed and marks the whole master run as failed with a clear message.
+- **`pl_ingest_exchange_rates`:** linked service `ls_frankfurter_api` (HTTP, anonymous – a public API without a
+  key, so nothing goes to Key Vault), source dataset HTTP + Binary, sink dataset Binary in
+  `bronze/ExchangeRates/ingestion_date=<today>/`. Binary keeps the response byte for byte, like every Bronze
+  copy. Parameters `history_from` / `history_to` (empty = the daily call `rates_latest.json`, filled = a one-time
+  history call `rates_<from>_<to>.json`). Retry 3 × 60 s, because an external API can be briefly unavailable.
+
 ## Databricks Jobs
 
 | Job | Tasks | Definition |
 |---|---|---|
 | `silver_vehicle_listings` | `validate_landing_and_bronze` (sources=vehicle_listings) → 4 × `stage_<source>_source` and `brand_lookup` in parallel → `vehicle_listings` | `orchestration/databricks_job_silver_vehicle_listings.yml` |
 | `silver_service_events` | `validate_landing_and_bronze` (sources=service_book) → `service_events` | `orchestration/databricks_job_silver_service_events.yml` |
+| `silver_exchange_rates` | `exchange_rates` (05) → `vehicle_listings_priced` (06, creates the view) | `orchestration/databricks_job_silver_exchange_rates.yml` |
 
 - Job parameters (`ingestion_date`, `dev_mode`, `sources`) reach every notebook task as widgets; a notebook
   without such a widget ignores it. `sources` tells `01_validate_landing_and_bronze` which landing/Bronze folders
@@ -72,10 +104,19 @@ All exported from ADF Studio (code view `{}`) into `adf/`:
 | Silver vehicle listings (Job activity) | `adf/pipeline/pl_silver_vehicle_listings.json` |
 | Silver service events (Job activity) | `adf/pipeline/pl_silver_service_events.json` |
 | Databricks linked service | `adf/linkedService/ls_databricks.json` |
+| Exchange rate API → Bronze copy | `adf/pipeline/pl_ingest_exchange_rates.json` |
+| Frankfurter API linked service (HTTP, anonymous) | `adf/linkedService/ls_frankfurter_api.json` |
+| API source dataset (HTTP, Binary, `relative_url` parameter) | `adf/dataset/ds_frankfurter_rates.json` |
+| Bronze sink dataset (Binary, `ExchangeRates/ingestion_date=<today>/<file_name>`) | `adf/dataset/ds_bronze_exchange_rates_sink.json` |
 | Daily trigger | `adf/trigger/tr_daily_master.json` |
 
 The datasets and the storage linked service of `pl_ingest_bronze_sources` are not exported yet (ADF Git
 integration was deferred).
+
+**Verified (2026-11-10, ADF Debug of `pl_ingest_exchange_rates`):** the history call (`history_from=2020-01-01`,
+`history_to=2026-11-10`) wrote `rates_2020-01-01_2026-11-10.json` (333 KB, 2019-12-31 → 2026-11-09, working
+days only, three currencies per day) and the daily call wrote `rates_latest.json` (190 bytes, 2026-11-09) into
+`bronze/ExchangeRates/ingestion_date=2026-11-10/`; read and written byte counts are equal.
 
 ## Authentication (no secrets)
 
@@ -117,5 +158,5 @@ mentor confirms the setup.
 
 - Is "ADF starts Databricks Jobs" the split he meant, and should the vehicle files keep being copied landing →
   Bronze by ADF (or by Databricks)?
-- The per-table ADF pipelines (`pl_silver_vehicle_listings`, `pl_silver_service_events`) contain one Job activity
-  each; the master could call the Jobs directly instead. Keep them (one pipeline per table) or simplify?
+- ~~Keep the one-activity wrapper pipelines?~~ Answered on 2026-11-10: no, the master calls the Jobs directly
+  (see "Target master pipeline").

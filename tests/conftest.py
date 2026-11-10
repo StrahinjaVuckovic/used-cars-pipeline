@@ -4,6 +4,7 @@ and a small local copy of the Bronze layer built from the files in data/.
 """
 
 import itertools
+import json
 import os
 import shutil
 import sys
@@ -66,6 +67,26 @@ def _partition(bronze: Path, folder: str) -> Path:
     return bronze / folder / f"ingestion_date={INGESTION_DATE}"
 
 
+# (date, quote, rate) with base EUR – real ECB rates of 2026-10-30 and 2026-11-02.
+SAMPLE_RATES = [
+    ("2026-10-30", "AUD", 1.6301), ("2026-10-30", "GBP", 0.8361), ("2026-10-30", "USD", 1.1162),
+    ("2026-11-02", "AUD", 1.6236), ("2026-11-02", "GBP", 0.8343), ("2026-11-02", "USD", 1.1193),
+]
+
+
+def rates_json(rows, base: str = "EUR") -> str:
+    """A response in the Frankfurter v2 format: a JSON array of {date, base, quote, rate} objects."""
+    return json.dumps([{"date": d, "base": base, "quote": q, "rate": r} for d, q, r in rows])
+
+
+def write_rates_partition(bronze: Path, ingestion_date: str, file_name: str, rows, base: str = "EUR") -> Path:
+    """Write one exchange rate response into bronze/ExchangeRates/ingestion_date=<date>/<file_name>."""
+    target = bronze / "ExchangeRates" / f"ingestion_date={ingestion_date}" / file_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(rates_json(rows, base) if not isinstance(rows, str) else rows, encoding="utf-8")
+    return target
+
+
 @pytest.fixture(scope="session")
 def bronze_sample(spark, tmp_path_factory) -> Path:
     """
@@ -96,6 +117,9 @@ def bronze_sample(spark, tmp_path_factory) -> Path:
     lookup = _partition(bronze, "Lookup")
     lookup.mkdir(parents=True)
     shutil.copyfile(DATA_DIR / "model_to_brand_lookup.csv", lookup / "model_to_brand_lookup.csv")
+
+    # Exchange rates: a small Frankfurter v2 response (Friday and Monday, no weekend rows like the ECB).
+    write_rates_partition(bronze, INGESTION_DATE, "rates_latest.json", SAMPLE_RATES)
 
     # Binary formats: let Spark write a small sample in the same format.
     for folder, file_name, file_format in [

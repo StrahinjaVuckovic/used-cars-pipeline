@@ -110,6 +110,11 @@ Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ─�
 
   The results equal the runs before the split, so splitting per source and validating against
   `ingestion_date` changed no data.
+- Verified again on 2026-11-10 after moving the lookup cleaning into its own task and giving the lookup a Bronze
+  date partition (ADF Debug of `pl_daily_master`, `ingestion_date=2026-11-10`, Silver rebuilt from an empty
+  `silver` container): `brand_lookup` 23,756 models / 44 manufacturers; `vehicle_listings` and `service_events`
+  with exactly the numbers above (brands per source: lookup 96.26 / 96.40 / 96.52 / 96.49 % for
+  First / Second / Third / Fourth).
 - DQ issues on the full vehicle data (2026-11-09): invalid_manufacture_year 10,739, invalid_latitude 9,987,
   invalid_longitude 9,987, zero_odometer 1,972, invalid_vin 1,602, invalid_odometer 578, invalid_price 50.
 
@@ -291,7 +296,8 @@ the row count is unchanged after the join.
 Used by `03_silver_vehicle_listings` for the brand mapping and later by Gold (`dim_brand_model`).
 
 **Grain:** one row per `model_normalized`. **Key:** `model_normalized` (unique, checked before writing).
-**Rows:** 23,756 models, 44 manufacturers (raw file: 23,848 rows). **Notebook:** `02_silver_brand_lookup`.
+**Rows:** 23,756 models, 44 manufacturers (raw file: 23,848 rows; verified on the cluster 2026-11-10: 90 rows
+removed as empty or duplicate after normalization, 2 rows of the conflicting `astra`). **Notebook:** `02_silver_brand_lookup`.
 
 | Column | Source | Type | Rule |
 |---|---|---|---|

@@ -104,6 +104,15 @@ mentor confirms the setup.
     same day's `vehicle_listings`.
 - The results equal the earlier manual runs, so moving the scheduling to ADF changed no data.
 
+## Verified (2026-11-10, after adding the `brand_lookup` task)
+
+- The lookup is copied into `bronze/Lookup/ingestion_date=…` (sink dataset `ds_bronze_lookup_sink` uses the same
+  date expression as the other sources) and cleaned by the new task `brand_lookup` in `silver_vehicle_listings`.
+- The `silver` container was emptied first (old tables, `*_dev` tables and the Delta history of all earlier test
+  runs), then `pl_daily_master` ran with `dev_mode=true` and `dev_mode=false` (`ingestion_date=2026-11-10`).
+- Full run: `brand_lookup` 23,756 models / 44 manufacturers; `vehicle_listings` 427,880 rows, the same valid %
+  and brands (412,552 / 3,181 / 12,147); `service_events` 8,312,490 rows, 100% coverage. Nothing changed.
+
 ## Open questions for the mentor
 
 - Is "ADF starts Databricks Jobs" the split he meant, and should the vehicle files keep being copied landing →

@@ -19,8 +19,24 @@
                 }
             },
             {
-                "name": "silver_vehicle_listings",
+                "name": "ingest_exchange_rates",
                 "type": "ExecutePipeline",
+                "dependsOn": [],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_ingest_exchange_rates",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true
+                }
+            },
+            {
+                "name": "silver_vehicle_listings",
+                "type": "DatabricksJob",
                 "dependsOn": [
                     {
                         "activity": "ingest_bronze",
@@ -30,27 +46,31 @@
                     }
                 ],
                 "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
                     "secureInput": false
                 },
                 "userProperties": [],
                 "typeProperties": {
-                    "pipeline": {
-                        "referenceName": "pl_silver_vehicle_listings",
-                        "type": "PipelineReference"
-                    },
-                    "waitOnCompletion": true,
-                    "parameters": {
-                        "ingestion_date": "@pipeline().parameters.ingestion_date",
-                        "dev_mode": {
-                            "value": "@pipeline().parameters.dev_mode",
+                    "jobId": "145364358563181",
+                    "jobParameters": {
+                        "ingestion_date": {
+                            "value": "@pipeline().parameters.ingestion_date",
                             "type": "Expression"
-                        }
+                        },
+                        "dev_mode": "@pipeline().parameters.dev_mode"
                     }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
                 }
             },
             {
                 "name": "silver_service_events",
-                "type": "ExecutePipeline",
+                "type": "DatabricksJob",
                 "dependsOn": [
                     {
                         "activity": "silver_vehicle_listings",
@@ -60,25 +80,83 @@
                     }
                 ],
                 "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
                     "secureInput": false
                 },
                 "userProperties": [],
                 "typeProperties": {
-                    "pipeline": {
-                        "referenceName": "pl_silver_service_events",
-                        "type": "PipelineReference"
-                    },
-                    "waitOnCompletion": true,
-                    "parameters": {
+                    "jobId": "1000309404951239",
+                    "jobParameters": {
                         "ingestion_date": {
                             "value": "@pipeline().parameters.ingestion_date",
                             "type": "Expression"
                         },
-                        "dev_mode": {
-                            "value": "@pipeline().parameters.dev_mode",
-                            "type": "Expression"
-                        }
+                        "dev_mode": "@pipeline().parameters.dev_mode"
                     }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "silver_exchange_rates",
+                "type": "DatabricksJob",
+                "dependsOn": [
+                    {
+                        "activity": "ingest_exchange_rates",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    },
+                    {
+                        "activity": "silver_vehicle_listings",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "jobId": "337789193702772",
+                    "jobParameters": {
+                        "ingestion_date": {
+                            "value": "@pipeline().parameters.ingestion_date",
+                            "type": "Expression"
+                        },
+                        "dev_mode": "@pipeline().parameters.dev_mode"
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "fx_ingest_failed",
+                "type": "Fail",
+                "dependsOn": [
+                    {
+                        "activity": "ingest_exchange_rates",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "message": "Exchange rate API copy failed, prices use the last available rates",
+                    "errorCode": "FX_INGEST_FAILED"
                 }
             }
         ],

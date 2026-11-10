@@ -1,6 +1,6 @@
 # Databricks Job "silver_service_events": the Silver pipeline of the service book.
 #
-# The mentor wants the service book run through ADF: the ADF pipeline pl_silver_service_events starts this Job
+# The mentor wants the service book run through ADF: the master pipeline pl_daily_master starts this Job
 # with a Databricks Job activity and waits for it (see documentation/orchestration.md). It is a Job and not two
 # ADF Notebook activities because used-cars-cluster is a dedicated (single user) cluster: a Notebook activity
 # runs as the ADF managed identity and is rejected, while a Job runs as its owner.

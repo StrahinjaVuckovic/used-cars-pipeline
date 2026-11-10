@@ -23,56 +23,49 @@ sources in parallel), so the same Job can also be started by hand in Databricks.
 
 ```
 tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created, currently STOPPED)
-└─ pl_daily_master                                            parameters: ingestion_date=latest, dev_mode=false
-   1. ingest_bronze            → pl_ingest_bronze_sources     6 × Copy: landing → bronze/<Source>/ingestion_date=…
-   2. silver_vehicle_listings  → pl_silver_vehicle_listings   Databricks Job silver_vehicle_listings
-   3. silver_service_events    → pl_silver_service_events     Databricks Job silver_service_events
-   (planned) exchange rates: pl_ingest_exchange_rates (API → Bronze) and a Job for silver.exchange_rates
-             + the priced view, after steps 1–2
-   (planned) gold: Job gold, after all Silver steps
+└─ pl_daily_master                                   parameters: ingestion_date=latest, dev_mode=false
+   ├─ ingest_bronze            Execute Pipeline pl_ingest_bronze_sources   6 × Copy: landing → bronze/<Source>/ingestion_date=…
+   ├─ ingest_exchange_rates    Execute Pipeline pl_ingest_exchange_rates   Copy: Frankfurter API → bronze/ExchangeRates/…
+   │                           (both start at once, no dependency)
+   ├─ silver_vehicle_listings  Job activity  after ingest_bronze: Succeeded
+   ├─ silver_service_events    Job activity  after silver_vehicle_listings: Succeeded
+   ├─ silver_exchange_rates    Job activity  after silver_vehicle_listings: Succeeded
+   │                                         and ingest_exchange_rates: Completed
+   └─ fx_ingest_failed         Fail activity after ingest_exchange_rates: Failed
+   (planned) gold: Job activity after all Silver Jobs
 ```
 
-- Every step starts only when the previous one **succeeded** (`dependencyConditions: Succeeded`), and every
-  Execute Pipeline activity has **Wait on completion** on, so a step never reads data that is still being written.
-- If a step fails, the following steps do not run and the master pipeline is marked failed in ADF Monitor.
-  The Silver tables keep their previous (complete) version: every write is a Delta overwrite, which is atomic.
-- `silver_service_events` runs **after** `silver_vehicle_listings`, so its coverage check (service-book vehicles
-  present in the listings) compares with the listings of the same day.
-- The parameters `ingestion_date` and `dev_mode` are passed down master → child pipeline → Job → notebook widget.
-  `dev_mode=true` runs the whole chain on samples and writes to the `*_dev` tables (cheap test of the wiring);
-  `ingestion_date=YYYY-MM-DD` reprocesses one Bronze partition (backfill). Both are **String** parameters: the
-  notebooks compare the widget with the text `"true"`, and an ADF Bool would arrive as `"True"`.
-
-## Target master pipeline (in progress, 2026-11-10)
-
-The mentor confirmed (2026-11-10) that the master should start the Databricks Jobs **directly** with Databricks Job
-activities: the one-activity wrapper pipelines `pl_silver_vehicle_listings` and `pl_silver_service_events` are
-removed. The ingest pipelines stay separate pipelines, because they hold ADF copy logic (six Copy activities;
-history parameters) and can be run on their own.
-
-```
-pl_daily_master
- ├─ ingest_bronze          Execute Pipeline pl_ingest_bronze_sources
- ├─ ingest_exchange_rates  Execute Pipeline pl_ingest_exchange_rates            (in parallel, no dependency)
- ├─ silver_vehicle_listings  Job activity   after ingest_bronze: Succeeded
- ├─ silver_service_events    Job activity   after silver_vehicle_listings: Succeeded
- ├─ silver_exchange_rates    Job activity   after silver_vehicle_listings: Succeeded
- │                                          and ingest_exchange_rates: Completed
- └─ fx_ingest_failed         Fail activity  after ingest_exchange_rates: Failed
-```
-
+- **Jobs are started directly** with Databricks Job activities (mentor, 2026-11-10). The earlier one-activity
+  wrapper pipelines `pl_silver_vehicle_listings` / `pl_silver_service_events` were deleted. The ingest pipelines
+  stay separate pipelines, because they hold ADF copy logic (six Copy activities; history parameters) and can be
+  run on their own.
+- A Silver step starts only when its inputs are complete (`Succeeded`), and every Execute Pipeline activity has
+  **Wait on completion** on, so a step never reads data that is still being written. If the vehicle step fails, the
+  steps after it do not run and the master is marked failed. The Silver tables keep their previous (complete)
+  version: every write is a Delta overwrite, which is atomic.
+- `silver_service_events` and `silver_exchange_rates` run **after** `silver_vehicle_listings`: the coverage check
+  of the service book and the priced view (row count, rate age against the listings' `ingestion_date`) must see
+  the listings of the same day, not a table that is being rewritten.
 - **The exchange rate API must not stop the day.** `silver_exchange_rates` waits for the copy with the condition
   *Completed* (succeeded or failed), so the listings, the service book and the priced view are processed even when
   the API is down; the view then uses the last delivered rates and `06` fails only when they are more than 5 days
   older than the listings.
 - **But the failure must be visible.** ADF decides the pipeline status from its last ("leaf") activities; a failed
   activity whose failure is handled by a *Completed* dependency would leave the master green. The Fail activity
-  `fx_ingest_failed` runs only when the copy failed and marks the whole master run as failed with a clear message.
+  `fx_ingest_failed` runs only when the copy failed and marks the whole master run as failed with the message
+  "Exchange rate API copy failed, prices use the last available rates" (error code `FX_INGEST_FAILED`).
+- The parameters `ingestion_date` and `dev_mode` are passed master → Job activity (`jobParameters`) → Job → notebook
+  widget. Every Job activity must list both: a Job activity without them silently runs the Job with its own
+  defaults (`dev_mode=false`, found in the first test of 2026-11-10). `dev_mode=true` runs the whole chain on
+  samples and writes to the `*_dev` tables (cheap test of the wiring); `ingestion_date=YYYY-MM-DD` reprocesses one
+  Bronze partition (backfill). Both are **String** parameters: the notebooks compare the widget with the text
+  `"true"`, and an ADF Bool would arrive as `"True"`.
 - **`pl_ingest_exchange_rates`:** linked service `ls_frankfurter_api` (HTTP, anonymous – a public API without a
   key, so nothing goes to Key Vault), source dataset HTTP + Binary, sink dataset Binary in
   `bronze/ExchangeRates/ingestion_date=<today>/`. Binary keeps the response byte for byte, like every Bronze
   copy. Parameters `history_from` / `history_to` (empty = the daily call `rates_latest.json`, filled = a one-time
-  history call `rates_<from>_<to>.json`). Retry 3 × 60 s, because an external API can be briefly unavailable.
+  history call `rates_<from>_<to>.json`). Retry 3 × 60 s and a 10-minute timeout, because an external API can be
+  briefly unavailable or hang.
 
 ## Databricks Jobs
 
@@ -86,7 +79,7 @@ pl_daily_master
   without such a widget ignores it. `sources` tells `01_validate_landing_and_bronze` which landing/Bronze folders
   belong to this Job. The Databricks UI does not allow task-level parameters next to job parameters, so `sources`
   is a job parameter.
-- Both Jobs run on the existing all-purpose cluster `used-cars-cluster` and have queueing on (a second run waits
+- All Jobs run on the existing all-purpose cluster `used-cars-cluster` and have queueing on (a second run waits
   instead of overwriting the same tables in parallel).
 - **Why the service book is a Job and not ADF Notebook activities:** `used-cars-cluster` is a dedicated
   (single user) cluster. A Notebook activity runs as the ADF managed identity and is rejected
@@ -101,8 +94,6 @@ All exported from ADF Studio (code view `{}`) into `adf/`:
 |---|---|
 | Master pipeline | `adf/pipeline/pl_daily_master.json` |
 | landing → Bronze copy | `adf/pipeline/pl_ingest_bronze_sources.json` |
-| Silver vehicle listings (Job activity) | `adf/pipeline/pl_silver_vehicle_listings.json` |
-| Silver service events (Job activity) | `adf/pipeline/pl_silver_service_events.json` |
 | Databricks linked service | `adf/linkedService/ls_databricks.json` |
 | Exchange rate API → Bronze copy | `adf/pipeline/pl_ingest_exchange_rates.json` |
 | Frankfurter API linked service (HTTP, anonymous) | `adf/linkedService/ls_frankfurter_api.json` |
@@ -131,7 +122,7 @@ days only, three currencies per day) and the daily call wrote `rates_latest.json
 ## Trigger and cost
 
 The trigger `tr_daily_master` exists but is **Stopped**. Every run copies ~2.5 GB into a new Bronze partition and
-keeps the cluster busy for ~10 minutes, and the subscription has limited credits. It will be started once the
+keeps the cluster busy for ~10–15 minutes, and the subscription has limited credits. It will be started once the
 mentor confirms the setup.
 
 ## Verified (2026-11-09, ADF Debug runs of `pl_daily_master`)
@@ -154,9 +145,21 @@ mentor confirms the setup.
 - Full run: `brand_lookup` 23,756 models / 44 manufacturers; `vehicle_listings` 427,880 rows, the same valid %
   and brands (412,552 / 3,181 / 12,147); `service_events` 8,312,490 rows, 100% coverage. Nothing changed.
 
+## Verified (2026-11-10, ADF Debug runs of the new `pl_daily_master`)
+
+- `dev_mode=false`: all five activities succeeded (ingest 34 s / 23 s in parallel, vehicle Job 4 min 22 s, then
+  service Job 3 min 43 s and exchange rate Job 2 min 27 s in parallel); `fx_ingest_failed` was skipped.
+- `dev_mode=true` with a broken API URL (negative test; `ls_frankfurter_api` pointed to a wrong path in the debug
+  session only, not published): `ingest_exchange_rates` failed after 4 min 25 s (1 + 3 retries),
+  `fx_ingest_failed` failed with its message, the three Jobs still succeeded – `silver_exchange_rates` waited for
+  the failed copy and built `vw_vehicle_listings_priced_dev` with the last delivered rates – and the master run was
+  marked **Failed**.
+- The first dev test had no `jobParameters` on the `silver_exchange_rates` activity, so that Job ran with
+  `dev_mode=false`; fixed before the runs above.
+
 ## Open questions for the mentor
 
 - Is "ADF starts Databricks Jobs" the split he meant, and should the vehicle files keep being copied landing →
   Bronze by ADF (or by Databricks)?
 - ~~Keep the one-activity wrapper pipelines?~~ Answered on 2026-11-10: no, the master calls the Jobs directly
-  (see "Target master pipeline").
+  (see "Daily master pipeline").

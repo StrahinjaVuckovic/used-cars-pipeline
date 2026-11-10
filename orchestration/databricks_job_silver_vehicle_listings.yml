@@ -1,7 +1,7 @@
 # Databricks Job "silver_vehicle_listings": the Silver pipeline of the four vehicle listing sources.
 #
 # Exported from the Databricks UI ("View as code", Databricks Asset Bundle format). Earlier name: silver_daily
-# (same Job ID); the service_events task moved to the ADF pipeline pl_silver_service_events, because the
+# (same Job ID); the service_events task moved to its own Job silver_service_events, because the
 # mentor wants the service book run through ADF. One change to the export: the notebook paths are relative to
 # this file instead of the personal workspace Git folder (/Workspace/Users/<user>/used-cars-pipeline/notebooks/...),
 # so the file contains no user name and can be deployed with `databricks bundle deploy` from the repository.

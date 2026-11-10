@@ -468,6 +468,18 @@ replaces it on every run (`vw_vehicle_listings_priced_dev` over the `_dev` table
   the last delivered rates (its `fx_rate_date` shows their age) and the master pipeline is marked failed
   (see `documentation/orchestration.md`).
 
+**Verified on the cluster (2026-11-10, Job `silver_exchange_rates`, dev then full):**
+- `exchange_rates`: one Bronze partition (`2026-11-10`, history + daily file), 5,277 raw rows → 5,274 rows (the
+  3 rows of 2026-11-09 came in both files); 1,758 days per currency from 2019-12-31 to 2026-11-09; ranges AUD
+  1.4306–1.8635, GBP 0.82388–0.92985, USD 0.9565–1.2338; latest rates 2026-11-09: AUD 1.6236, GBP 0.8343, USD 1.1193.
+- `vw_vehicle_listings_priced`: 427,880 rows (AUD 133,607, EUR 133,442, GBP 133,971, USD 26,860 listings),
+  `fx_rate_date` 2026-11-09 (1 day before the listings' ingestion date), all checks passed. Sample conversions
+  recomputed by hand: 15,497 EUR → 12,929.15 GBP; 21,990 AUD → 11,299.74 GBP; 21,590 GBP → 28,965.22 USD.
+- Data observation: the average listing price is ~18,000 in every original currency (AUD, EUR, GBP, USD), so the
+  source prices look like the same numbers labelled with different currencies – after conversion the EUR and GBP
+  listings look more expensive than the AUD ones. Worth mentioning to the analysts / mentor; the conversion itself
+  is correct.
+
 ## New vehicle listings
 
 New listings arrive as **files in `landing`**: ADF copies them into a new Bronze partition and the Silver Jobs

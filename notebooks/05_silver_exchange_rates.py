@@ -221,12 +221,13 @@ else:
     load_metrics = last_operation_metrics(TARGET_PATH)
     log.info(f"Overwrote {TARGET_PATH} with {rates_count} rows")
 
-batch_df.unpersist()
-raw_df.unpersist()
 
 # COMMAND ----------
 
 # The whole table after the load: still one row per day and currency, in the documented columns.
+# (unpersist is not the last line of a cell: Databricks would print the DataFrame it returns.)
+batch_df.unpersist()
+raw_df.unpersist()
 silver_df = read_delta_table(TARGET_PATH)
 assert_columns(silver_df, EXCHANGE_RATES_COLUMNS, TABLE_NAME)
 assert_unique(silver_df, KEY_COLUMNS, TABLE_NAME)

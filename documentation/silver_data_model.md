@@ -453,6 +453,14 @@ that does not come from `landing`:
     the notebook ends successfully): use `load_mode=full` for a backfill.
   - Each MERGE adds about one small file per day (~365 a year). That is negligible for a few thousand rows, so no
     `OPTIMIZE` is scheduled; run `OPTIMIZE` on the table if it ever becomes slow to read.
+- **Verified on the cluster (2026-11-12, Job `silver_exchange_rates`, full data):**
+  - re-run without new data: `watermark=2026-11-10`, 1 partition read, MERGE with 0 rows inserted / 0 updated and
+    no file added (`DESCRIBE HISTORY`: version 3 = `MERGE`, versions 0–2 = the earlier overwrites);
+  - after a daily ADF copy (`ingestion_date=2026-11-12`, ECB day 2026-11-11): 2 partitions read, 3 rows inserted,
+    0 updated, 5,277 rows (1,759 days × 3); the view used the 2026-11-11 rates.
+  - 2026-11-10 is missing: the history call ended with 2026-11-09 and the next daily call returned 2026-11-11.
+    A history call of the pipeline (`history_from` / `history_to`) fills such a gap; an automatic sliding window
+    was judged a detail by the mentor.
 - **Full load** (`load_mode=full`, run by hand): every partition up to `ingestion_date`, overwrite. Used for a
   backfill (the table as it was on that day) or to rebuild the table after a fix.
 - **Checks stop the run before anything is written** (rates are reference data: one wrong rate makes every

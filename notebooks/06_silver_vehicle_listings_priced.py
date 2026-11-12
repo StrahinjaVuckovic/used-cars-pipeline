@@ -176,7 +176,15 @@ if eur_row is not None:
     expected = round(float(eur_row.price) * gbp_rate, 2)
     assert abs(float(eur_row.price_gbp) - expected) <= 0.01, f"{VIEW_NAME}: EUR check {eur_row} vs {expected}"
 
-log.info(f"{VIEW_NAME}: {priced_count} rows at the rates of {fx_rate_date} ({rate_age_days} days old), checks passed")
+# Normally the rates are a day or two older than the listings; they are newer when the listings were loaded
+# earlier than the latest exchange rate copy.
+rate_age_text = (
+    f"{rate_age_days} days before" if rate_age_days >= 0 else f"{-rate_age_days} days after"
+)
+log.info(
+    f"{VIEW_NAME}: {priced_count} rows at the rates of {fx_rate_date} ({rate_age_text} the listings' "
+    f"ingestion date {listings_ingestion_date}), checks passed"
+)
 
 # COMMAND ----------
 
@@ -201,4 +209,5 @@ display(priced_df.select("vehicle_id", "price", "currency", "fx_rate_date", *PRI
 
 # COMMAND ----------
 
-priced_df.unpersist()
+# Assigned, so the notebook does not print the DataFrame that unpersist returns.
+_ = priced_df.unpersist()

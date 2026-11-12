@@ -80,3 +80,34 @@ def test_get_ingestion_path_without_partitions_fails(config, bronze_with_partiti
     config["BRONZE_PATH"] = str(bronze_with_partitions)
     with pytest.raises(ValueError, match="No 'ingestion_date="):
         config["get_ingestion_path"]("EmptySource")
+
+
+def test_logger_writes_timestamped_lines_to_the_current_stdout(config, capsys):
+    log = config["get_logger"]("test_notebook")
+    log.info("hello")
+    log.warning("careful")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].endswith("INFO    [test_notebook] hello")
+    assert lines[1].endswith("WARNING [test_notebook] careful")
+    assert lines[0][:4].isdigit() and lines[0][4] == "-"  # starts with the date
+
+
+def test_logger_is_not_duplicated_when_config_runs_again(spark, capsys):
+    """Every notebook runs %run ./00_config, so get_logger runs several times for the same name."""
+    for _ in range(2):
+        namespace = new_namespace(spark)
+        run_notebook("00_config.py", namespace)
+        log = namespace["get_logger"]("repeated_notebook")
+    log.info("once")
+    assert capsys.readouterr().out.count("once") == 1
+    assert len(log.handlers) == 1 and log.propagate is False
+
+
+def test_pipeline_notebooks_log_instead_of_print():
+    """Pipeline notebooks use get_logger (timestamped lines in the Job output); profiling notebooks may print."""
+    from notebook_utils import NOTEBOOKS_DIR
+
+    pipeline_notebooks = sorted(NOTEBOOKS_DIR.glob("0[1-9]_*.py")) + [NOTEBOOKS_DIR / "utils/vehicle_listings_cleaning.py"]
+    assert len(pipeline_notebooks) >= 10
+    for notebook in pipeline_notebooks:
+        assert "print(" not in notebook.read_text(encoding="utf-8"), f"{notebook.name} still uses print"

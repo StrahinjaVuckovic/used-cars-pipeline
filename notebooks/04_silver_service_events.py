@@ -32,7 +32,8 @@ DEV_SAMPLE_ROWS = 50000
 TABLE_NAME = "service_events_dev" if DEV_MODE else "service_events"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
+log = get_logger("04_silver_service_events")
+log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -92,7 +93,7 @@ assert not missing, f"ServiceBook: missing Bronze columns {missing}"
 
 raw_df = standardize_nulls(raw_df.select(*RAW_SERVICE_COLUMNS, "source_file_path")).cache()
 raw_count = raw_df.count()
-print(f"ServiceBook: {partition_path} -> {raw_count} raw rows")
+log.info(f"ServiceBook: {partition_path} -> {raw_count} raw rows")
 
 # COMMAND ----------
 
@@ -103,10 +104,10 @@ print(f"ServiceBook: {partition_path} -> {raw_count} raw rows")
 distinct_counts = raw_df.select(
     *[F.countDistinct(c).alias(c) for c in CONSTANT_COLUMNS]
 ).first().asDict()
-print(f"Distinct values in dropped columns: {distinct_counts}")
+log.info(f"Distinct values in dropped columns: {distinct_counts}")
 for column_name, distinct_count in distinct_counts.items():
     if distinct_count > 1:
-        print(f"WARNING: {column_name} now has {distinct_count} distinct values – reconsider dropping it.")
+        log.warning(f"{column_name} now has {distinct_count} distinct values – reconsider dropping it.")
 
 # COMMAND ----------
 
@@ -197,7 +198,7 @@ service_events_df = df.select(*SERVICE_EVENTS_COLUMNS)
 # COMMAND ----------
 
 silver_count = service_events_df.count()
-print(f"service_events: {raw_count} raw rows -> {silver_count} rows ({raw_count - silver_count} duplicates removed)")
+log.info(f"service_events: {raw_count} raw rows -> {silver_count} rows ({raw_count - silver_count} duplicates removed)")
 
 assert_unique(service_events_df, ["service_event_id"], "service_events")
 assert_columns(service_events_df, SERVICE_EVENTS_COLUMNS, "service_events")
@@ -207,8 +208,8 @@ assert_columns(service_events_df, SERVICE_EVENTS_COLUMNS, "service_events")
 unparsed_df = df.filter(F.array_contains("dq_issues", "unparsed_service_date"))
 unparsed_dates = unparsed_df.count()
 if unparsed_dates > 0:
-    print(
-        f"WARNING: {unparsed_dates} service_date values could not be parsed (flagged 'unparsed_service_date')."
+    log.warning(
+        f"{unparsed_dates} service_date values could not be parsed (flagged 'unparsed_service_date')."
     )
     display(unparsed_df.groupBy("service_date_raw").count().orderBy(F.desc("count")).limit(20))
 
@@ -222,7 +223,7 @@ write_delta_table(service_events_df, TARGET_PATH)
 raw_df.unpersist()
 
 silver_df = read_delta_table(TARGET_PATH)
-print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
+log.info(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -259,6 +260,6 @@ if delta_table_exists(listings_path):
     listing_vehicles = read_delta_table(listings_path).select("vehicle_id").distinct()
     matched = service_vehicles.join(listing_vehicles, "vehicle_id", "inner").count()
     total = service_vehicles.count()
-    print(f"{matched} of {total} service-book vehicles ({100 * matched / max(total, 1):.2f}%) exist in {listings_path}")
+    log.info(f"{matched} of {total} service-book vehicles ({100 * matched / max(total, 1):.2f}%) exist in {listings_path}")
 else:
-    print(f"No Delta table at {listings_path} yet – run 03_silver_vehicle_listings first to see coverage.")
+    log.info(f"No Delta table at {listings_path} yet – run 03_silver_vehicle_listings first to see coverage.")

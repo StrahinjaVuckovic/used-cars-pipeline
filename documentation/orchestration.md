@@ -75,16 +75,40 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
 | `silver_service_events` | `validate_landing_and_bronze` (sources=service_book) → `service_events` | `orchestration/databricks_job_silver_service_events.yml` |
 | `silver_exchange_rates` | `exchange_rates` (05) → `vehicle_listings_priced` (06, creates the view) | `orchestration/databricks_job_silver_exchange_rates.yml` |
 
-- Job parameters (`ingestion_date`, `dev_mode`, `sources`) reach every notebook task as widgets; a notebook
-  without such a widget ignores it. `sources` tells `01_validate_landing_and_bronze` which landing/Bronze folders
+- Job parameters (`ingestion_date`, `dev_mode`, `sources`, and `load_mode` in `silver_exchange_rates`) reach every
+  notebook task as widgets; a notebook without such a widget ignores it. `sources` tells `01_validate_landing_and_bronze` which landing/Bronze folders
   belong to this Job. The Databricks UI does not allow task-level parameters next to job parameters, so `sources`
   is a job parameter.
+- `load_mode` (`silver_exchange_rates` only, default `incremental`): `05_silver_exchange_rates` merges only the
+  new Bronze partitions into `exchange_rates`. The ADF master does not pass it, so the daily run uses the default;
+  a backfill or rebuild is started by hand from the Job UI with `load_mode=full` (see
+  `documentation/silver_data_model.md`).
 - All Jobs run on the existing all-purpose cluster `used-cars-cluster` and have queueing on (a second run waits
   instead of overwriting the same tables in parallel).
 - **Why the service book is a Job and not ADF Notebook activities:** `used-cars-cluster` is a dedicated
   (single user) cluster. A Notebook activity runs as the ADF managed identity and is rejected
   (`Single-user check failed`); a Job runs as its owner and is accepted. A new job cluster per activity would also
   work, but it adds ~5 minutes of cluster start per activity.
+
+## Logging and monitoring
+
+- **Progress of a run:** ADF Monitor → Pipeline runs → `pl_daily_master` shows every activity with its status,
+  duration and error. The output of a Job activity has `runPageUrl`, a link to the Databricks Job run. In
+  Databricks, Jobs & Pipelines → Job → Runs shows the task graph of each run.
+- **Inside a task:** every pipeline notebook logs with `get_logger("<notebook>")` from `00_config` (Python
+  `logging`): one line per step with time, level and notebook, e.g.
+
+  ```
+  2026-11-12 02:14:03 INFO    [05_silver_exchange_rates] incremental load, watermark=2026-11-11: reading 2 of 3 partitions [...]
+  2026-11-12 02:14:25 INFO    [05_silver_exchange_rates] Merged into abfss://.../exchange_rates: 3 rows inserted, 0 rows updated
+  2026-11-12 02:20:41 WARNING [04_silver_service_events] 12 service_date values could not be parsed (...)
+  ```
+
+  The lines appear in the task output of the Job run (and in the notebook when it is run by hand). `WARNING` marks
+  something to look at that did not stop the run; a problem that makes the data wrong stops the run with an
+  assertion instead.
+- The log lives with the run; it is not stored in a table. A persistent `run_log` table (rows and DQ counts per
+  day) was discussed with the mentor and left for later.
 
 ## ADF objects
 

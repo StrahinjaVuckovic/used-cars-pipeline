@@ -39,7 +39,8 @@ assert SELECTED_SOURCES in SOURCE_GROUPS, (
 
 SOURCE_FOLDERS = SOURCE_GROUPS[SELECTED_SOURCES]
 
-print(f"sources={SELECTED_SOURCES}: {SOURCE_FOLDERS}")
+log = get_logger("01_validate_landing_and_bronze")
+log.info(f"sources={SELECTED_SOURCES}: {SOURCE_FOLDERS}")
 
 # COMMAND ----------
 
@@ -107,7 +108,7 @@ for folder in SOURCE_FOLDERS:
         partitions = sorted(i.name.rstrip("/") for i in dbutils.fs.ls(f"{BRONZE_PATH}/{folder}") if i.isDir())
     except Exception:
         partitions = []
-    print(f"{folder}: {partitions}")
+    log.info(f"{folder}: {partitions}")
 
 # COMMAND ----------
 
@@ -122,4 +123,4 @@ size_mismatch = [row[0] for row in overview if row[1] and row[4] and not row[6]]
 assert not missing_in_landing, f"No files in landing for: {missing_in_landing}"
 assert not missing_in_bronze, f"No Bronze copy for: {missing_in_bronze} (run the ADF pipeline pl_ingest_bronze_sources)"
 assert not size_mismatch, f"Latest Bronze copy differs in size from landing for: {size_mismatch}"
-print(f"All {len(SOURCE_FOLDERS)} sources are in landing and have a complete latest Bronze copy.")
+log.info(f"All {len(SOURCE_FOLDERS)} sources are in landing and have a complete latest Bronze copy.")

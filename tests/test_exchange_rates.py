@@ -1,4 +1,7 @@
-"""Tests for notebooks/05_silver_exchange_rates.py (Frankfurter responses in Bronze → silver/exchange_rates)."""
+"""Tests for notebooks/05_silver_exchange_rates.py (Frankfurter responses in Bronze → silver/exchange_rates).
+
+The first run of a test is a full load (no table yet); later runs in the same test are incremental (MERGE).
+"""
 
 import datetime
 
@@ -20,12 +23,12 @@ EXPECTED_DTYPES = {
 }
 
 
-def run_rates(spark, bronze, silver, dev_mode="false", ingestion_date="latest") -> dict:
+def run_rates(spark, bronze, silver, dev_mode="false", ingestion_date="latest", load_mode="incremental") -> dict:
     namespace = load_config_and_utils(
         spark,
         bronze_path=str(bronze),
         silver_path=str(silver),
-        widget_values={"ingestion_date": ingestion_date, "dev_mode": dev_mode},
+        widget_values={"ingestion_date": ingestion_date, "dev_mode": dev_mode, "load_mode": load_mode},
     )
     return run_notebook(NOTEBOOK, namespace)
 
@@ -121,3 +124,118 @@ def test_error_response_stops_the_run(spark, tmp_path):
     write_rates_partition(bronze, INGESTION_DATE, "rates_latest.json", '{"status": 422, "message": "invalid currency: XYZ"}')
     with pytest.raises(AssertionError, match="missing fields .* \\(not a rates response\\?\\)"):
         run_rates(spark, bronze, tmp_path / "silver")
+
+
+# ---------- incremental load ----------
+
+
+def table_rows(spark, silver):
+    """{(rate_date, quote_currency): row} of the Silver table."""
+    return {(str(r.rate_date), r.quote_currency): r for r in read_rates(spark, silver).collect()}
+
+
+def table_version(spark, silver) -> int:
+    return spark.sql(f"DESCRIBE HISTORY delta.`{silver / 'exchange_rates'}` LIMIT 1").first().version
+
+
+def test_first_run_without_a_table_is_a_full_load(spark, tmp_path, catalog_untouched):
+    bronze = tmp_path / "bronze"
+    write_rates_partition(bronze, "2026-11-01", "rates_latest.json", day_rates("2026-10-30"))
+
+    namespace = run_rates(spark, bronze, tmp_path / "silver")
+
+    assert (namespace["watermark"], namespace["EFFECTIVE_LOAD_MODE"]) == (None, "full")
+    assert namespace["load_metrics"]["operation"] == "WRITE"
+
+
+def test_incremental_run_merges_only_the_partitions_from_the_watermark_on(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-01", "rates_2026-10-29_2026-10-30.json",
+                          day_rates("2026-10-29") + day_rates("2026-10-30", gbp=0.81))
+    run_rates(spark, bronze, silver)
+    before = table_rows(spark, silver)
+
+    # Next daily response: Friday again with another value and the new Monday.
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json",
+                          day_rates("2026-10-30", gbp=0.82) + day_rates("2026-11-02"))
+    namespace = run_rates(spark, bronze, silver)
+
+    assert (namespace["watermark"], namespace["EFFECTIVE_LOAD_MODE"]) == ("2026-11-01", "incremental")
+    assert namespace["selected_dates"] == ["2026-11-01", "2026-11-03"]  # the watermark partition is read again
+    metrics = namespace["load_metrics"]
+    assert (metrics["operation"], metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == ("MERGE", 3, 3)
+
+    after = table_rows(spark, silver)
+    assert len(after) == 9
+    assert (after[("2026-10-30", "GBP")].rate, str(after[("2026-10-30", "GBP")].ingestion_date)) == (0.82, "2026-11-03")
+    # Days that were not touched keep their row, including the processing timestamp.
+    assert after[("2026-10-29", "USD")] == before[("2026-10-29", "USD")]
+
+
+def test_rerun_without_new_partitions_changes_nothing(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json", day_rates("2026-11-02"))
+    run_rates(spark, bronze, silver)
+    before = table_rows(spark, silver)
+
+    namespace = run_rates(spark, bronze, silver)
+
+    metrics = namespace["load_metrics"]
+    assert (metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == (0, 0)
+    assert table_rows(spark, silver) == before
+
+
+def test_same_day_recopy_of_the_partition_is_merged(spark, tmp_path, catalog_untouched):
+    """A second master run on the same day overwrites rates_latest.json in the watermark partition."""
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json", day_rates("2026-11-02"))
+    run_rates(spark, bronze, silver)
+
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json",
+                          day_rates("2026-11-02", gbp=0.9) + day_rates("2026-11-03"))
+    namespace = run_rates(spark, bronze, silver)
+
+    metrics = namespace["load_metrics"]
+    assert (metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == (3, 1)
+    assert table_rows(spark, silver)[("2026-11-02", "GBP")].rate == 0.9
+
+
+def test_invalid_new_partition_leaves_the_table_unchanged(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-01", "rates_latest.json", day_rates("2026-10-30"))
+    run_rates(spark, bronze, silver)
+    before, version = table_rows(spark, silver), table_version(spark, silver)
+
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json", day_rates("2026-11-02", gbp=0.0))
+    with pytest.raises(AssertionError, match="'rate_not_positive': 1"):
+        run_rates(spark, bronze, silver)
+
+    assert table_rows(spark, silver) == before
+    assert table_version(spark, silver) == version  # nothing was written
+
+
+def test_full_load_overwrites_the_table(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-01", "rates_latest.json", day_rates("2026-10-30"))
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json", day_rates("2026-11-02"))
+    run_rates(spark, bronze, silver)
+
+    # Backfill: the table as it was on 2026-11-01.
+    namespace = run_rates(spark, bronze, silver, ingestion_date="2026-11-01", load_mode="full")
+
+    assert (namespace["watermark"], namespace["load_metrics"]["operation"]) == (None, "WRITE")
+    assert set(table_rows(spark, silver)) == {("2026-10-30", c) for c in ["AUD", "GBP", "USD"]}
+
+
+def test_incremental_run_for_a_date_before_the_watermark_loads_nothing(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    write_rates_partition(bronze, "2026-11-01", "rates_latest.json", day_rates("2026-10-30"))
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json", day_rates("2026-11-02"))
+    run_rates(spark, bronze, silver)
+    version = table_version(spark, silver)
+
+    namespace = run_rates(spark, bronze, silver, ingestion_date="2026-11-01")
+
+    assert namespace["notebook_exit_value"] == "nothing to load"
+    assert table_version(spark, silver) == version
+    assert len(table_rows(spark, silver)) == 6

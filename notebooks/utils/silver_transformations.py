@@ -238,6 +238,40 @@ def write_delta_table(df: DataFrame, path: str, num_files: int = None) -> None:
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
 
 
+def merge_delta_table(df: DataFrame, path: str, key_columns: list, update_condition: str = None) -> dict:
+    """
+    Upsert `df` into the Delta table at `path` (incremental load) and return the MERGE operation metrics.
+
+    Rows whose key exists are updated (only where `update_condition` is true, if given; `s` = new rows,
+    `t` = table rows), all other rows are inserted. Rows of the table that are not in `df` stay unchanged.
+    `df` must have the table's columns and at most one row per key.
+    Plain SQL MERGE (no DeltaTable API), so it behaves the same on every cluster type and locally.
+    """
+    source_view = "_merge_source"
+    df.createOrReplaceTempView(source_view)
+    join_condition = " AND ".join(f"t.`{c}` = s.`{c}`" for c in key_columns)
+    when_matched = f"WHEN MATCHED AND ({update_condition})" if update_condition else "WHEN MATCHED"
+    try:
+        spark.sql(
+            f"""
+            MERGE INTO delta.`{path}` AS t
+            USING {source_view} AS s
+            ON {join_condition}
+            {when_matched} THEN UPDATE SET *
+            WHEN NOT MATCHED THEN INSERT *
+            """
+        )
+    finally:
+        spark.catalog.dropTempView(source_view)
+    return last_operation_metrics(path)
+
+
+def last_operation_metrics(path: str) -> dict:
+    """Metrics of the latest write to the Delta table at `path` (e.g. numTargetRowsInserted after a MERGE)."""
+    latest = spark.sql(f"DESCRIBE HISTORY delta.`{path}` LIMIT 1").first()
+    return {"operation": latest.operation, **{k: int(v) for k, v in (latest.operationMetrics or {}).items()}}
+
+
 def read_delta_table(path: str) -> DataFrame:
     """Read the Delta table stored at `path`."""
     return spark.read.format("delta").load(path)

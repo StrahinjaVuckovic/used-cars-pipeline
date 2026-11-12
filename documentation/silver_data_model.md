@@ -69,6 +69,9 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources),
   Delta table history (`VERSION AS OF`). Changes over time are tracked in Gold with SCD Type 2.
 - Backfills must be run in chronological order, because the last processed date becomes the Silver state.
 - If a source ever becomes incremental, `overwrite` must be replaced by a Delta `MERGE` on the table key.
+- **Exception: `exchange_rates` is loaded incrementally** (mentor, 2026-11-12). The API delivers one new day per
+  call (a history, not a snapshot), so the table is extended with a `MERGE` instead of being rebuilt from every
+  Bronze partition each day; see [`silver.exchange_rates`](#silverexchange_rates).
 - **Validation never depends on the run date.** Rules such as "not in the future" compare with the
   `ingestion_date` of the Bronze partition, not with `current_date()`. The same Bronze input therefore gives the
   same Silver output on any day (re-runs and backfills). Only `silver_processed_at` changes between runs.
@@ -89,7 +92,7 @@ Bronze Lookup/ingestion_date=…    ──►  02_silver_brand_lookup           
                                        (in parallel with the 4 sources)                                               ▼
                                                                        03_silver_vehicle_listings  ──►  silver/vehicle_listings
 Bronze ServiceBook/ingestion_date=…  ──►  04_silver_service_events  ──►  silver/service_events
-Bronze ExchangeRates/ingestion_date=… (all) ──►  05_silver_exchange_rates  ──►  silver/exchange_rates ─┐
+Bronze ExchangeRates/ingestion_date=… (≥ watermark) ──►  05 (MERGE)  ──►  silver/exchange_rates ───────┐
                                     silver/vehicle_listings ─────────────────────────────────────────┴─► 06 ──► view vw_vehicle_listings_priced
 ```
 
@@ -433,12 +436,30 @@ that does not come from `landing`:
 | `source_file_path` | Bronze file | string | lineage |
 | `silver_processed_at` | — | timestamp | lineage |
 
-- **History, not a snapshot:** unlike the other sources, the notebook reads **every** Bronze partition (up to the
-  `ingestion_date` widget). A day that arrives more than once (a Saturday call returns Friday again, the history
-  file overlaps daily calls) is kept from the **latest ingestion**.
-- **Checks stop the run** (rates are reference data: one wrong rate makes every converted price wrong): base EUR,
-  rate > 0, every day has exactly USD, GBP and AUD, no `rate_date` after its `ingestion_date`, unique key, and an
-  error response (`{"status": 422, ...}`) is rejected.
+- **History, not a snapshot:** a vehicle file holds every listing, so only its latest partition matters; an
+  exchange rate response holds only new days, so the table is the sum of all partitions. A day that arrives more
+  than once (a Saturday call returns Friday again, the history file overlaps daily calls) is kept from the
+  **latest ingestion**.
+- **Incremental load** (widget / Job parameter `load_mode=incremental`, the default):
+  - **watermark** = the latest `ingestion_date` in the table (the latest ingestion always wins the deduplication,
+    so it is always present);
+  - only the Bronze partitions **from the watermark on** (`>=`) are read and deduplicated;
+  - they are merged on (`rate_date`, `quote_currency`): new days are inserted; a known day is updated only by a
+    newer ingestion, or by the same ingestion with another rate; every other row is left as it is.
+  - The watermark partition is read again on purpose: a second master run on the same day overwrites
+    `rates_latest.json` in the same folder, and with `>` its new content would be skipped. Merging an unchanged
+    partition again inserts and updates nothing, so re-runs are idempotent.
+  - The first run (no table yet) is a full load. An `ingestion_date` before the watermark loads nothing (warning,
+    the notebook ends successfully): use `load_mode=full` for a backfill.
+  - Each MERGE adds about one small file per day (~365 a year). That is negligible for a few thousand rows, so no
+    `OPTIMIZE` is scheduled; run `OPTIMIZE` on the table if it ever becomes slow to read.
+- **Full load** (`load_mode=full`, run by hand): every partition up to `ingestion_date`, overwrite. Used for a
+  backfill (the table as it was on that day) or to rebuild the table after a fix.
+- **Checks stop the run before anything is written** (rates are reference data: one wrong rate makes every
+  converted price wrong): base EUR, rate > 0, every day has exactly USD, GBP and AUD, no `rate_date` after its
+  `ingestion_date`, unique key, and an error response (`{"status": 422, ...}`) is rejected. The checks run on the
+  new rows; the table keeps its previous version when they fail. After the load the whole table is checked again
+  for a unique key and the documented columns.
 
 ## Silver view `vw_vehicle_listings_priced`
 

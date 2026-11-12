@@ -56,6 +56,50 @@ configure_adls_oauth(STORAGE_ACCOUNT, SECRET_SCOPE)
 
 # COMMAND ----------
 
+import logging
+import sys
+
+LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+class _CurrentStdoutHandler(logging.StreamHandler):
+    """
+    Writes to whatever sys.stdout is at the moment of logging.
+
+    A plain StreamHandler keeps the stdout object it was created with. Databricks redirects stdout for every
+    cell (and pytest for every test), so such a handler would write to an old stream and the lines would not
+    show up in the notebook or Job task output.
+    """
+
+    @property
+    def stream(self):
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, value):
+        pass
+
+
+def get_logger(name: str) -> logging.Logger:
+    """
+    Logger for a notebook: timestamped `INFO` / `WARNING` lines in the notebook and Job task output.
+
+    `%run ./00_config` runs this cell again in every notebook, so the handler is added only once per logger.
+    propagate=False keeps the lines out of the Databricks driver loggers (no duplicates).
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = _CurrentStdoutHandler()
+        handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger
+
+
+# COMMAND ----------
+
 # Vehicle listing sources: logical name -> Bronze folder, file format and optional reader options.
 # Note: the fourth source lives in the Bronze folder "FourthSource" (file has no extension, content is NDJSON).
 # FirstSourceSystem.csv has bare carriage returns ("\r") inside quoted `description` values. Without

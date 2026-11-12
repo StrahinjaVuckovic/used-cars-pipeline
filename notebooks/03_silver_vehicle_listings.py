@@ -52,7 +52,8 @@ BRAND_COLUMNS = ["manufacturer", "manufacturer_source"]
 _brand_position = STAGE_COLUMNS.index("model_normalized") + 1
 VEHICLE_LISTINGS_COLUMNS = STAGE_COLUMNS[:_brand_position] + BRAND_COLUMNS + STAGE_COLUMNS[_brand_position:]
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
+log = get_logger("03_silver_vehicle_listings")
+log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -135,7 +136,7 @@ if INGESTION_DATE != "latest":
     assert stage_ingestion_date == INGESTION_DATE, (
         f"Stage tables were built from ingestion_date={stage_ingestion_date}, not {INGESTION_DATE}"
     )
-print(f"All stage tables come from ingestion_date={stage_ingestion_date}")
+log.info(f"All stage tables come from ingestion_date={stage_ingestion_date}")
 
 # COMMAND ----------
 
@@ -156,7 +157,7 @@ assert lookup_dates == [stage_ingestion_date], (
 brand_lookup_df = lookup_table_df.select("model_normalized", "manufacturer").cache()
 # Checked again here: a duplicate model would multiply listings in the join.
 assert_unique(brand_lookup_df, ["model_normalized"], "brand lookup")
-print(
+log.info(
     f"Brand lookup: {brand_lookup_df.count()} models, "
     f"{brand_lookup_df.select('manufacturer').distinct().count()} manufacturers ({lookup_path})"
 )
@@ -191,7 +192,7 @@ assert actual_rows == expected_rows, f"Row count {actual_rows} != sum of stage t
 # vehicle_id must also be unique across sources; each source notebook only sees its own rows.
 unparsed_dates = check_vehicle_listings(vehicle_listings_df, VEHICLE_LISTINGS_COLUMNS, "vehicle_listings")
 
-print(f"vehicle_listings: {actual_rows} rows, checks passed ({unparsed_dates} unparsed posting_date values)")
+log.info(f"vehicle_listings: {actual_rows} rows, checks passed ({unparsed_dates} unparsed posting_date values)")
 
 # COMMAND ----------
 
@@ -203,7 +204,7 @@ write_delta_table(vehicle_listings_df, TARGET_PATH, num_files=OUTPUT_FILES)
 brand_lookup_df.unpersist()
 
 silver_df = read_delta_table(TARGET_PATH)
-print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
+log.info(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 

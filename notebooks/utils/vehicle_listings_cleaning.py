@@ -230,8 +230,8 @@ def check_vehicle_listings(df: DataFrame, expected_columns: list, table_name: st
     unparsed_df = df.filter(F.array_contains("dq_issues", "unparsed_posting_date"))
     unparsed_dates = unparsed_df.count()
     if unparsed_dates > 0:
-        print(
-            f"WARNING: {table_name}: {unparsed_dates} posting_date values could not be parsed "
+        get_logger("vehicle_listings_cleaning").warning(
+            f"{table_name}: {unparsed_dates} posting_date values could not be parsed "
             "(flagged 'unparsed_posting_date'). Check whether a new date format appeared in POSTING_DATE_FORMATS."
         )
         display(unparsed_df.groupBy("platform_name", "posting_date_raw").count().orderBy(F.desc("count")).limit(20))

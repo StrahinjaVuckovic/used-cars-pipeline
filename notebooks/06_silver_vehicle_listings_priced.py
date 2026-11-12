@@ -59,7 +59,8 @@ PRICE_COLUMNS = [f"price_{c.lower()}" for c in TARGET_CURRENCIES]
 # ECB publishes no rates on weekends and holidays (Easter: Friday to Monday), so up to 5 days is normal.
 MAX_FX_RATE_AGE_DAYS = 5
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, view={VIEW_NAME}")
+log = get_logger("06_silver_vehicle_listings_priced")
+log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, view={VIEW_NAME}")
 
 # COMMAND ----------
 
@@ -126,7 +127,7 @@ if INGESTION_DATE != "latest":
         f"vehicle_listings was built from ingestion_date={listings_ingestion_date}, not {INGESTION_DATE}"
     )
 listings_count = listings_df.count()
-print(f"vehicle_listings: {listings_count} rows from ingestion_date={listings_ingestion_date}")
+log.info(f"vehicle_listings: {listings_count} rows from ingestion_date={listings_ingestion_date}")
 
 # COMMAND ----------
 
@@ -136,7 +137,7 @@ print(f"vehicle_listings: {listings_count} rows from ingestion_date={listings_in
 
 create_priced_view(VIEW_NAME, LISTINGS_PATH, RATES_PATH)
 priced_df = spark.table(VIEW_NAME).cache()
-print(f"Created view {VIEW_NAME}")
+log.info(f"Created view {VIEW_NAME}")
 
 # COMMAND ----------
 
@@ -175,7 +176,7 @@ if eur_row is not None:
     expected = round(float(eur_row.price) * gbp_rate, 2)
     assert abs(float(eur_row.price_gbp) - expected) <= 0.01, f"{VIEW_NAME}: EUR check {eur_row} vs {expected}"
 
-print(f"{VIEW_NAME}: {priced_count} rows at the rates of {fx_rate_date} ({rate_age_days} days old), checks passed")
+log.info(f"{VIEW_NAME}: {priced_count} rows at the rates of {fx_rate_date} ({rate_age_days} days old), checks passed")
 
 # COMMAND ----------
 

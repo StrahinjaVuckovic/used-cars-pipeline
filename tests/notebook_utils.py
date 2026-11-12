@@ -73,13 +73,27 @@ class _Fs:
         return items
 
 
+class NotebookExit(Exception):
+    """Raised by the dbutils.notebook.exit mock; run_notebook stops the notebook there, like Databricks."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.value = value
+
+
+class _Notebook:
+    def exit(self, value):
+        raise NotebookExit(value)
+
+
 class DBUtilsMock:
-    """Minimal stand-in for dbutils: widgets, secrets and fs.ls on the local file system."""
+    """Minimal stand-in for dbutils: widgets, secrets, fs.ls on the local file system and notebook.exit."""
 
     def __init__(self, widget_values: dict = None):
         self.widgets = _Widgets(widget_values or {})
         self.secrets = _Secrets()
         self.fs = _Fs()
+        self.notebook = _Notebook()
 
 
 class DisplayMock:
@@ -97,9 +111,16 @@ def read_notebook(relative_path: str) -> str:
 
 
 def run_notebook(relative_path: str, namespace: dict) -> dict:
-    """Execute a whole notebook in `namespace` (the `%run` lines are comments and are skipped by Python)."""
+    """Execute a whole notebook in `namespace` (the `%run` lines are comments and are skipped by Python).
+
+    A call to dbutils.notebook.exit stops the notebook (as on Databricks) and sets `notebook_exit_value`.
+    """
     source = read_notebook(relative_path)
-    exec(compile(source, str(NOTEBOOKS_DIR / relative_path), "exec"), namespace)
+    try:
+        exec(compile(source, str(NOTEBOOKS_DIR / relative_path), "exec"), namespace)
+    except NotebookExit as notebook_exit:
+        # dbutils.notebook.exit ends a Databricks notebook successfully; keep the exit value for the test.
+        namespace["notebook_exit_value"] = notebook_exit.value
     return namespace
 
 

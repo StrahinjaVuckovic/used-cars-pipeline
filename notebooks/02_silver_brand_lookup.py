@@ -49,7 +49,8 @@ BRAND_LOOKUP_COLUMNS = [
     "model_normalized", "manufacturer", "ingestion_date", "source_file_path", "silver_processed_at",
 ]
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
+log = get_logger("02_silver_brand_lookup")
+log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -105,7 +106,7 @@ normalized_count = normalize_brand_lookup(raw_df).count()
 conflicts_df = conflicting_models(normalize_brand_lookup(raw_df))
 lookup_count = brand_lookup_df.count()
 manufacturer_count = brand_lookup_df.select("manufacturer").distinct().count()
-print(f"{TABLE_NAME}: {partition_path} -> {raw_count} raw rows, {lookup_count} models, {manufacturer_count} manufacturers")
+log.info(f"{TABLE_NAME}: {partition_path} -> {raw_count} raw rows, {lookup_count} models, {manufacturer_count} manufacturers")
 
 # COMMAND ----------
 
@@ -117,7 +118,7 @@ assert_columns(brand_lookup_df, BRAND_LOOKUP_COLUMNS, TABLE_NAME)
 assert lookup_count > 0, f"{TABLE_NAME}: no models left after cleaning {partition_path}"
 # 03 joins the listings on model_normalized: a duplicate key would multiply listings.
 assert_unique(brand_lookup_df, ["model_normalized"], TABLE_NAME)
-print(f"{TABLE_NAME}: {lookup_count} rows, checks passed")
+log.info(f"{TABLE_NAME}: {lookup_count} rows, checks passed")
 
 # COMMAND ----------
 
@@ -131,7 +132,7 @@ brand_lookup_df.unpersist()
 raw_df.unpersist()
 
 silver_df = read_delta_table(TARGET_PATH)
-print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
+log.info(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 

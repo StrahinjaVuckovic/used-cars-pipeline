@@ -3,7 +3,7 @@
 # MAGIC # 05 – Silver: exchange_rates
 # MAGIC
 # MAGIC Builds the daily exchange rate history from the Frankfurter API responses that ADF copies into Bronze
-# MAGIC (`bronze/ExchangeRates/ingestion_date=YYYY-MM-DD/*.json`) and overwrites the Delta table
+# MAGIC (`bronze/ExchangeRates/ingestion_date=YYYY-MM-DD/*.json`) and loads it into the Delta table
 # MAGIC `abfss://silver@sausedcarspipelinesv.dfs.core.windows.net/exchange_rates` (path-based).
 # MAGIC `06_silver_vehicle_listings_priced` uses the latest rates to convert listing prices.
 # MAGIC
@@ -12,20 +12,34 @@
 # MAGIC object per day and currency: `{"date": "2026-11-09", "base": "EUR", "quote": "GBP", "rate": 0.8343}`.
 # MAGIC The ECB publishes rates on working days only, so weekends and holidays have no row.
 # MAGIC
-# MAGIC **Unlike the other sources, all Bronze partitions are read.** A vehicle file is a full snapshot (the
-# MAGIC latest one is the truth), but every exchange rate response adds days to a history. The daily response holds
-# MAGIC the latest day; a one-time history response (`rates_<from>_<to>.json`) holds every day since the first listing.
-# MAGIC The same day can come from several responses (a Saturday run returns Friday again): the row of the latest
-# MAGIC ingestion is kept.
+# MAGIC **History, not a snapshot.** A vehicle file is a full snapshot (the latest one is the truth), but every
+# MAGIC exchange rate response adds days to a history. The daily response holds the latest day; a one-time history
+# MAGIC response (`rates_<from>_<to>.json`) holds every day since the first listing. The same day can come from
+# MAGIC several responses (a Saturday run returns Friday again): the row of the latest ingestion is kept.
 # MAGIC
-# MAGIC **Checks stop the run** (rates are reference data like the brand lookup: one wrong rate would make every
-# MAGIC converted price wrong): base EUR, rate > 0, every day has exactly USD, GBP and AUD, no day after its
-# MAGIC ingestion date, unique key.
+# MAGIC **Incremental load (default).** The watermark is the latest `ingestion_date` already in the table.
+# MAGIC Only the Bronze partitions from the watermark on are read and merged into the table on
+# MAGIC `(rate_date, quote_currency)`:
+# MAGIC - a new day is inserted;
+# MAGIC - a known day is updated only by a newer ingestion (or by the same ingestion with another rate, when ADF
+# MAGIC   copied the partition again on the same day);
+# MAGIC - all other rows stay as they are.
+# MAGIC
+# MAGIC The watermark partition itself is read again (`>=`, not `>`): a second master run on the same day
+# MAGIC overwrites `rates_latest.json` in the same folder, and its new content must not be skipped.
+# MAGIC The first run (no table yet) is a full load.
+# MAGIC
+# MAGIC **Full load** (`load_mode=full`): reads every partition up to `ingestion_date` and overwrites the table.
+# MAGIC Used for a backfill (the table looks as it did on that day) or to rebuild the table after a fix.
+# MAGIC
+# MAGIC **Checks stop the run before anything is written** (rates are reference data like the brand lookup: one
+# MAGIC wrong rate would make every converted price wrong): base EUR, rate > 0, every day has exactly USD, GBP and
+# MAGIC AUD, no day after its ingestion date, unique key.
 # MAGIC
 # MAGIC **Widgets**
-# MAGIC - `ingestion_date`: `latest` (default) reads every partition; a `YYYY-MM-DD` date reads only the partitions
-# MAGIC   up to that date (backfill: the table looks as it did on that day).
-# MAGIC - `dev_mode`: `true` writes to `exchange_rates_dev`. All partitions are always read (a few thousand rows).
+# MAGIC - `ingestion_date`: `latest` (default) or a `YYYY-MM-DD` date: only partitions up to that date are read.
+# MAGIC - `load_mode`: `incremental` (default) or `full`.
+# MAGIC - `dev_mode`: `true` writes to `exchange_rates_dev`. The data is small, so nothing is sampled.
 
 # COMMAND ----------
 
@@ -38,36 +52,58 @@
 # COMMAND ----------
 
 dbutils.widgets.text("ingestion_date", "latest")
+dbutils.widgets.dropdown("load_mode", "incremental", ["incremental", "full"])
 dbutils.widgets.dropdown("dev_mode", "true", ["true", "false"])
 
 INGESTION_DATE = dbutils.widgets.get("ingestion_date").strip()
+LOAD_MODE = dbutils.widgets.get("load_mode")
 DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
 
 TABLE_NAME = "exchange_rates_dev" if DEV_MODE else "exchange_rates"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
 RAW_RATE_COLUMNS = ["date", "base", "quote", "rate"]
+KEY_COLUMNS = ["rate_date", "quote_currency"]
 # Final column order of silver.exchange_rates (must match the documentation).
 EXCHANGE_RATES_COLUMNS = [
     "rate_date", "base_currency", "quote_currency", "rate",
     "ingestion_date", "source_file_path", "silver_processed_at",
 ]
+# MERGE: a known day is updated by a newer ingestion, or by a re-copy of the same partition with another rate.
+# Re-running the same partition unchanged updates nothing.
+MERGE_UPDATE_CONDITION = (
+    "s.ingestion_date > t.ingestion_date OR (s.ingestion_date = t.ingestion_date AND s.rate <> t.rate)"
+)
 
-print(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
+log = get_logger("05_silver_exchange_rates")
+log.info(f"ingestion_date={INGESTION_DATE}, load_mode={LOAD_MODE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
 
-def select_ingestion_dates(available_dates: list, ingestion_date: str) -> list:
-    """All partitions for "latest", otherwise the partitions up to the requested date (which must exist)."""
+def select_ingestion_dates(available_dates: list, ingestion_date: str, watermark: str = None) -> list:
+    """
+    The partitions to read: all of them for "latest", otherwise those up to the requested date (which must
+    exist). With a watermark (incremental load) only the partitions from the watermark on.
+    """
     if ingestion_date == "latest":
-        return available_dates
-    if ingestion_date not in available_dates:
+        dates = available_dates
+    elif ingestion_date not in available_dates:
         raise ValueError(
             f"Ingestion date {ingestion_date} not found for {EXCHANGE_RATES_SOURCE['folder']}. "
             f"Available: {available_dates}"
         )
-    return [d for d in available_dates if d <= ingestion_date]
+    else:
+        dates = [d for d in available_dates if d <= ingestion_date]
+    return [d for d in dates if d >= watermark] if watermark else dates
+
+
+def current_watermark(path: str):
+    """The latest ingestion_date in the table as YYYY-MM-DD, or None when the table does not exist yet."""
+    if not delta_table_exists(path):
+        return None
+    latest = read_delta_table(path).agg(F.max("ingestion_date")).first()[0]
+    return str(latest) if latest else None
 
 
 def read_rate_partition(ingestion_date: str) -> DataFrame:
@@ -93,7 +129,7 @@ def standardize_rates(raw_df: DataFrame) -> DataFrame:
         "source_file_path",
     )
     return deduplicate(
-        typed_df, ["rate_date", "quote_currency"], [F.desc("ingestion_date"), F.desc("source_file_path")]
+        typed_df, KEY_COLUMNS, [F.desc("ingestion_date"), F.desc("source_file_path")]
     ).withColumn("silver_processed_at", F.current_timestamp())
 
 
@@ -116,48 +152,86 @@ def rate_problems(rates_df: DataFrame) -> dict:
 
 # COMMAND ----------
 
+# MAGIC %md ## Choose the partitions (watermark)
+
+# COMMAND ----------
+
+watermark = current_watermark(TARGET_PATH) if LOAD_MODE == "incremental" else None
+if LOAD_MODE == "incremental" and watermark is None:
+    log.info(f"No table at {TARGET_PATH} yet: the first run is a full load")
+EFFECTIVE_LOAD_MODE = "incremental" if watermark else "full"
+
+available_dates = list_ingestion_dates(EXCHANGE_RATES_SOURCE["folder"])
+selected_dates = select_ingestion_dates(available_dates, INGESTION_DATE, watermark)
+log.info(
+    f"{EFFECTIVE_LOAD_MODE} load, watermark={watermark}: "
+    f"reading {len(selected_dates)} of {len(available_dates)} partitions {selected_dates}"
+)
+
+if not selected_dates:
+    # Incremental load with an ingestion_date before the watermark: these partitions are already loaded.
+    log.warning(
+        f"No partitions from the watermark {watermark} up to ingestion_date={INGESTION_DATE}: nothing loaded. "
+        "Use load_mode=full for a backfill."
+    )
+    dbutils.notebook.exit("nothing to load")
+
+# COMMAND ----------
+
 # MAGIC %md ## Read Bronze and standardize
 
 # COMMAND ----------
 
-available_dates = list_ingestion_dates(EXCHANGE_RATES_SOURCE["folder"])
-selected_dates = select_ingestion_dates(available_dates, INGESTION_DATE)
-print(f"Reading {len(selected_dates)} of {len(available_dates)} partitions: {selected_dates}")
-
 raw_df = reduce(DataFrame.unionByName, [read_rate_partition(d) for d in selected_dates]).cache()
-exchange_rates_df = standardize_rates(raw_df).select(*EXCHANGE_RATES_COLUMNS).cache()
+batch_df = standardize_rates(raw_df).select(*EXCHANGE_RATES_COLUMNS).cache()
 
 raw_count = raw_df.count()
-rates_count = exchange_rates_df.count()
-print(f"{TABLE_NAME}: {raw_count} raw rows -> {rates_count} rows ({raw_count - rates_count} repeated days removed)")
+rates_count = batch_df.count()
+log.info(f"{TABLE_NAME}: {raw_count} raw rows -> {rates_count} rows ({raw_count - rates_count} repeated days removed)")
 
 # COMMAND ----------
 
-# MAGIC %md ## Checks
+# MAGIC %md ## Checks (before anything is written)
 
 # COMMAND ----------
 
-assert_columns(exchange_rates_df, EXCHANGE_RATES_COLUMNS, TABLE_NAME)
+assert_columns(batch_df, EXCHANGE_RATES_COLUMNS, TABLE_NAME)
 assert rates_count > 0, f"{TABLE_NAME}: no rates in {selected_dates}"
-assert_unique(exchange_rates_df, ["rate_date", "quote_currency"], TABLE_NAME)
+assert_unique(batch_df, KEY_COLUMNS, TABLE_NAME)
 
-problems = rate_problems(exchange_rates_df)
+problems = rate_problems(batch_df)
 assert not any(problems.values()), f"{TABLE_NAME}: invalid exchange rates {problems}"
-print(f"{TABLE_NAME}: {rates_count} rows, checks passed")
+log.info(f"{TABLE_NAME}: {rates_count} rows, checks passed")
 
 # COMMAND ----------
 
-# MAGIC %md ## Write to Silver (Delta, full overwrite)
+# MAGIC %md ## Write to Silver (Delta: MERGE, or overwrite for a full load)
 
 # COMMAND ----------
 
-# A few thousand rows: one file.
-write_delta_table(exchange_rates_df, TARGET_PATH, num_files=1)
-exchange_rates_df.unpersist()
+if EFFECTIVE_LOAD_MODE == "incremental":
+    load_metrics = merge_delta_table(batch_df, TARGET_PATH, KEY_COLUMNS, MERGE_UPDATE_CONDITION)
+    log.info(
+        f"Merged into {TARGET_PATH}: {load_metrics.get('numTargetRowsInserted', 0)} rows inserted, "
+        f"{load_metrics.get('numTargetRowsUpdated', 0)} rows updated"
+    )
+else:
+    # A few thousand rows: one file.
+    write_delta_table(batch_df, TARGET_PATH, num_files=1)
+    load_metrics = last_operation_metrics(TARGET_PATH)
+    log.info(f"Overwrote {TARGET_PATH} with {rates_count} rows")
+
+batch_df.unpersist()
 raw_df.unpersist()
 
+# COMMAND ----------
+
+# The whole table after the load: still one row per day and currency, in the documented columns.
 silver_df = read_delta_table(TARGET_PATH)
-print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
+assert_columns(silver_df, EXCHANGE_RATES_COLUMNS, TABLE_NAME)
+assert_unique(silver_df, KEY_COLUMNS, TABLE_NAME)
+table_count = silver_df.count()
+log.info(f"{TABLE_NAME} now has {table_count} rows")
 
 # COMMAND ----------
 
@@ -180,7 +254,7 @@ display(
 
 # COMMAND ----------
 
-# Rows per Bronze ingestion that survived the deduplication.
+# Rows per Bronze ingestion that survived the deduplication (the latest one is the watermark of the next run).
 display(silver_df.groupBy("ingestion_date").count().orderBy("ingestion_date"))
 
 # COMMAND ----------

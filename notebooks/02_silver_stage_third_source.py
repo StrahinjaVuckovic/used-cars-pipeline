@@ -46,7 +46,8 @@ DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
 TABLE_NAME = f"vehicle_listings_stage/{SOURCE_SYSTEM.lower()}"
 TARGET_PATH = stage_table_path(SOURCE_SYSTEM, DEV_MODE)
 
-print(f"source={SOURCE_SYSTEM}, ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
+log = get_logger("02_silver_stage_third_source")
+log.info(f"source={SOURCE_SYSTEM}, ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
 
 # COMMAND ----------
 
@@ -59,7 +60,7 @@ stage_df = clean_vehicle_listings(raw_df, SOURCE_SYSTEM, partition_date).cache()
 
 raw_count = raw_df.count()
 stage_count = stage_df.count()
-print(
+log.info(
     f"{SOURCE_SYSTEM}: {partition_path} -> {raw_count} raw rows, {stage_count} after dedup "
     f"({raw_count - stage_count} duplicates removed)"
 )
@@ -74,9 +75,9 @@ unparsed_dates = check_vehicle_listings(stage_df, STAGE_COLUMNS, TABLE_NAME)
 
 other_currencies = unexpected_currencies(stage_df, EXPECTED_CURRENCIES)
 if other_currencies:
-    print(f"WARNING: {SOURCE_SYSTEM} has currencies that are not expected for this source: {other_currencies}")
+    log.warning(f"{SOURCE_SYSTEM} has currencies that are not expected for this source: {other_currencies}")
 
-print(f"{TABLE_NAME}: {stage_count} rows, checks passed ({unparsed_dates} unparsed posting_date values)")
+log.info(f"{TABLE_NAME}: {stage_count} rows, checks passed ({unparsed_dates} unparsed posting_date values)")
 
 # COMMAND ----------
 
@@ -88,7 +89,7 @@ write_delta_table(stage_df, TARGET_PATH, num_files=STAGE_OUTPUT_FILES)
 stage_df.unpersist()
 
 silver_df = read_delta_table(TARGET_PATH)
-print(f"Written {silver_df.count()} rows to {TARGET_PATH}")
+log.info(f"Written {silver_df.count()} rows to {TARGET_PATH}")
 
 # COMMAND ----------
 

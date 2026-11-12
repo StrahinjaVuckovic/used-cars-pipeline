@@ -4,7 +4,7 @@
 # with notebook paths relative to this file instead of the personal workspace Git folder.
 #
 # Task graph:
-#   exchange_rates (05: all Bronze ExchangeRates partitions -> silver/exchange_rates)
+#   exchange_rates (05: Bronze ExchangeRates partitions from the watermark on -> MERGE into silver/exchange_rates)
 #    └─ vehicle_listings_priced (06: view dbw_used_cars_strahinja.silver.vw_vehicle_listings_priced)
 #
 # There is no validate task: the rates come from an API, not from landing, and 05 itself fails when Bronze has
@@ -39,3 +39,7 @@ resources:
           default: "false"
         - name: ingestion_date
           default: latest
+        # incremental (daily, MERGE of the new Bronze partitions) or full (by hand: backfill / rebuild).
+        # The ADF master does not pass it, so the daily run uses this default.
+        - name: load_mode
+          default: incremental

@@ -240,3 +240,30 @@ def test_write_delta_table_allows_schema_change(spark, utils, tmp_path):
     utils["write_delta_table"](spark.range(2), path)
     utils["write_delta_table"](spark.range(2).withColumn("extra", F.lit("x")), path)
     assert utils["read_delta_table"](path).columns == ["id", "extra"]
+
+
+def test_merge_delta_table_inserts_new_keys_and_updates_matching_ones(spark, utils, tmp_path):
+    path = str(tmp_path / "t")
+    utils["write_delta_table"](spark.createDataFrame([(1, "a", 1), (2, "b", 1)], "id INT, value STRING, version INT"), path)
+
+    metrics = utils["merge_delta_table"](
+        spark.createDataFrame([(2, "B", 2), (3, "c", 2)], "id INT, value STRING, version INT"), path, ["id"]
+    )
+
+    rows = {r.id: r.value for r in utils["read_delta_table"](path).collect()}
+    assert rows == {1: "a", 2: "B", 3: "c"}  # id 1 is not in the new rows and stays
+    assert (metrics["operation"], metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == ("MERGE", 1, 1)
+
+
+def test_merge_delta_table_updates_only_where_the_condition_holds(spark, utils, tmp_path):
+    path = str(tmp_path / "t")
+    utils["write_delta_table"](spark.createDataFrame([(1, "new", 5), (2, "old", 1)], "id INT, value STRING, version INT"), path)
+
+    metrics = utils["merge_delta_table"](
+        spark.createDataFrame([(1, "older", 3), (2, "newer", 3)], "id INT, value STRING, version INT"),
+        path, ["id"], update_condition="s.version > t.version",
+    )
+
+    assert {r.id: r.value for r in utils["read_delta_table"](path).collect()} == {1: "new", 2: "newer"}
+    assert (metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == (0, 1)
+    assert not spark.catalog.tableExists("_merge_source")  # the temp view is dropped

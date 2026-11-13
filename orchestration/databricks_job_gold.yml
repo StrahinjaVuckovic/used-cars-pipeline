@@ -1,0 +1,79 @@
+# Databricks Job "gold": the Gold star schema from the Silver tables.
+#
+# Same format as databricks_job_silver_vehicle_listings.yml (Databricks Asset Bundle, "View as code" in the UI),
+# with notebook paths relative to this file instead of the personal workspace Git folder.
+#
+# Task graph:
+#   dim_date, dim_vehicle, dim_small                  (07: dimensions, in parallel)
+#    └─ fact_listing, fact_service_event, fact_exchange_rate   (08: facts, in parallel; each checks its foreign keys
+#        └─ views                                                against the dimensions written above)
+#                                                     (08_gold_views: Unity Catalog views gold.<table> and
+#                                                      vw_listing_current_price)
+#
+# Every Gold table is rebuilt in full from Silver (full overwrite, deterministic xxhash64 keys).
+# No schedule here: the Job is started by the ADF pipeline pl_daily_master after the Silver Jobs.
+
+resources:
+  jobs:
+    gold:
+      name: gold
+      tasks:
+        - task_key: dim_date
+          notebook_task:
+            notebook_path: ../notebooks/07_gold_dim_date
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: dim_vehicle
+          notebook_task:
+            notebook_path: ../notebooks/07_gold_dim_vehicle
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: dim_small
+          notebook_task:
+            notebook_path: ../notebooks/07_gold_dim_small
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: fact_listing
+          depends_on:
+            - task_key: dim_date
+            - task_key: dim_vehicle
+            - task_key: dim_small
+          notebook_task:
+            notebook_path: ../notebooks/08_gold_fact_listing
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: fact_service_event
+          depends_on:
+            - task_key: dim_date
+            - task_key: dim_vehicle
+            - task_key: dim_small
+          notebook_task:
+            notebook_path: ../notebooks/08_gold_fact_service_event
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: fact_exchange_rate
+          depends_on:
+            - task_key: dim_date
+            - task_key: dim_small
+          notebook_task:
+            notebook_path: ../notebooks/08_gold_fact_exchange_rate
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+        - task_key: views
+          depends_on:
+            - task_key: fact_listing
+            - task_key: fact_service_event
+            - task_key: fact_exchange_rate
+          notebook_task:
+            notebook_path: ../notebooks/08_gold_views
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+      # A run started while another is active waits in the queue instead of running in parallel.
+      queue:
+        enabled: true
+
+      parameters:
+        - name: dev_mode
+          default: "false"
+        - name: ingestion_date
+          default: latest

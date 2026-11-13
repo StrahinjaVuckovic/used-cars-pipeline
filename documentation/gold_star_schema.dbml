@@ -1,0 +1,167 @@
+// Gold layer – star schema (fact constellation) for the used vehicle pipeline
+// Draw at https://dbdiagram.io (DBML). Surrogate keys = xxhash64(natural key); -1 = "Unknown" member.
+// The columns must match GOLD_COLUMNS in notebooks/utils/gold_helpers.py (checked by tests/test_gold.py).
+
+Project used_cars_gold {
+  database_type: 'Databricks (Delta Lake)'
+  Note: 'Gold layer: dimensions shared by four fact tables. Full overwrite from Silver every day.'
+}
+
+// ---------------- Dimensions ----------------
+
+Table dim_date [headercolor: #3498DB] {
+  date_key int [pk, note: 'yyyyMMdd, -1 = Unknown']
+  date date
+  year int
+  quarter int
+  month int
+  month_name varchar
+  week_of_year int
+  day_of_week int [note: 'ISO: Monday = 1 ... Sunday = 7']
+  day_name varchar
+  is_weekend boolean
+  Note: 'One row per day, 1950-01-01 (earliest valid service date) to 2030-12-31. Role-playing: posting, service and rate date.'
+}
+
+Table dim_vehicle [headercolor: #3498DB] {
+  vehicle_key bigint [pk, note: 'xxhash64(vehicle_id), -1 = Unknown']
+  vehicle_id varchar [unique, note: 'natural key from Silver']
+  vin varchar
+  manufacture_year int
+  manufacturer varchar [note: 'display name, e.g. Toyota, BMW; Unknown when not mapped']
+  model varchar
+  manufacturer_source varchar [note: 'lookup / listing_url / unknown']
+  condition varchar
+  cylinders int
+  fuel varchar
+  transmission varchar
+  drive varchar
+  size varchar
+  body_type varchar
+  paint_color varchar
+  title_status varchar
+  listing_url varchar
+  has_service_history boolean
+  Note: 'Conformed dimension: listings, service events and reliability all use it. SCD Type 1.'
+}
+
+Table dim_location [headercolor: #3498DB] {
+  location_key bigint [pk, note: 'xxhash64(state, region), -1 = Unknown']
+  state varchar [note: 'two-letter code']
+  region varchar
+}
+
+Table dim_platform [headercolor: #3498DB] {
+  platform_key bigint [pk, note: 'xxhash64(platform_id), -1 = Unknown']
+  platform_id int
+  platform_name varchar [note: 'Craigslist, CarGurus, AutoScout24, CarsGuide']
+}
+
+Table dim_currency [headercolor: #3498DB] {
+  currency_key bigint [pk, note: 'xxhash64(currency_code), -1 = Unknown']
+  currency_code varchar [note: 'EUR, USD, GBP, AUD']
+  currency_name varchar
+}
+
+Table dim_service_type [headercolor: #3498DB] {
+  service_type_key bigint [pk, note: 'xxhash64 of all columns, -1 = Unknown']
+  service_type varchar
+  event_type varchar [note: 'MAINTENANCE / INSPECTION / REPAIR / UNKNOWN']
+  maintenance_kind varchar
+  severity varchar [note: 'LOW / MEDIUM / HIGH']
+  is_maintenance boolean
+  is_repair boolean
+  is_inspection boolean
+  is_oil_change boolean
+  Note: 'Junk dimension: each distinct combination of the service classification columns.'
+}
+
+// ---------------- Facts ----------------
+
+Table fact_listing [headercolor: #E67E22] {
+  vehicle_key bigint [pk, note: 'one listing = one vehicle']
+  posting_date_key int
+  location_key bigint
+  platform_key bigint
+  currency_key bigint
+  price "decimal(18,2)" [note: 'original currency']
+  price_eur_at_posting "decimal(18,2)"
+  price_gbp_at_posting "decimal(18,2)"
+  price_usd_at_posting "decimal(18,2)"
+  price_aud_at_posting "decimal(18,2)"
+  fx_rate_date date [note: 'last ECB day on or before the posting date']
+  odometer int [note: 'unit not confirmed (km or miles)']
+  latitude double
+  longitude double
+  source_system varchar [note: 'degenerate: First / Second / Third / Fourth']
+  is_valid boolean
+  dq_issues "array<string>"
+  Note: 'Grain: one vehicle listing. Current prices (latest rates): view vw_listing_current_price.'
+}
+
+Table fact_service_event [headercolor: #E67E22] {
+  service_event_id varchar [pk, note: 'degenerate key from Silver']
+  vehicle_key bigint
+  service_date_key int
+  service_type_key bigint
+  cost_eur "decimal(10,2)"
+  downtime_days int
+  odometer_km int
+  km_since_prev int
+  oil_gap_km int
+  oil_gap_penalty double
+  is_skipped_service boolean
+  is_valid boolean
+  Note: 'Grain: one service event.'
+}
+
+Table fact_exchange_rate [headercolor: #E67E22] {
+  rate_date_key int
+  currency_key bigint
+  rate_per_eur double [note: '1 EUR = rate x currency; EUR itself = 1']
+  indexes {
+    (rate_date_key, currency_key) [pk]
+  }
+  Note: 'Grain: one ECB working day and currency.'
+}
+
+Table fact_vehicle_reliability [headercolor: #E67E22] {
+  vehicle_key bigint [pk]
+  reliability_score double [note: '0-100, null = no service history']
+  Note: 'Grain: one vehicle. Planned: score components follow in the Reliability Score plan.'
+}
+
+// ---------------- Relationships (many-to-one) ----------------
+
+Ref: fact_listing.vehicle_key > dim_vehicle.vehicle_key
+Ref: fact_listing.posting_date_key > dim_date.date_key
+Ref: fact_listing.location_key > dim_location.location_key
+Ref: fact_listing.platform_key > dim_platform.platform_key
+Ref: fact_listing.currency_key > dim_currency.currency_key
+
+Ref: fact_service_event.vehicle_key > dim_vehicle.vehicle_key
+Ref: fact_service_event.service_date_key > dim_date.date_key
+Ref: fact_service_event.service_type_key > dim_service_type.service_type_key
+
+Ref: fact_exchange_rate.rate_date_key > dim_date.date_key
+Ref: fact_exchange_rate.currency_key > dim_currency.currency_key
+
+Ref: fact_vehicle_reliability.vehicle_key - dim_vehicle.vehicle_key // one-to-one
+
+// ---------------- Groups ----------------
+
+TableGroup dimensions {
+  dim_date
+  dim_vehicle
+  dim_location
+  dim_platform
+  dim_currency
+  dim_service_type
+}
+
+TableGroup facts {
+  fact_listing
+  fact_service_event
+  fact_exchange_rate
+  fact_vehicle_reliability
+}

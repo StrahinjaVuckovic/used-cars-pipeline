@@ -31,8 +31,8 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
    ├─ silver_service_events    Job activity  after silver_vehicle_listings: Succeeded
    ├─ silver_exchange_rates    Job activity  after silver_vehicle_listings: Succeeded
    │                                         and ingest_exchange_rates: Completed
-   └─ fx_ingest_failed         Fail activity after ingest_exchange_rates: Failed
-   (planned) gold: Job activity after all Silver Jobs
+   ├─ fx_ingest_failed         Fail activity after ingest_exchange_rates: Failed
+   └─ gold (to be added)       Job activity  after silver_service_events and silver_exchange_rates: Succeeded
 ```
 
 - **Jobs are started directly** with Databricks Job activities (mentor, 2026-11-10). The earlier one-activity
@@ -79,6 +79,7 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
 | `silver_vehicle_listings` | `validate_landing_and_bronze` (sources=vehicle_listings) → 4 × `stage_<source>_source` and `brand_lookup` in parallel → `vehicle_listings` | `orchestration/databricks_job_silver_vehicle_listings.yml` |
 | `silver_service_events` | `validate_landing_and_bronze` (sources=service_book) → `service_events` | `orchestration/databricks_job_silver_service_events.yml` |
 | `silver_exchange_rates` | `exchange_rates` (05) → `vehicle_listings_priced` (06, creates the view) | `orchestration/databricks_job_silver_exchange_rates.yml` |
+| `gold` | `dim_date`, `dim_vehicle`, `dim_small` (07, parallel) → `fact_listing`, `fact_service_event`, `fact_exchange_rate` (08, parallel) → `views` (08, Unity Catalog views `gold.<table>` and `vw_listing_current_price`) | `orchestration/databricks_job_gold.yml` |
 
 - Job parameters (`ingestion_date`, `dev_mode`, `sources`, and `load_mode` in `silver_exchange_rates`) reach every
   notebook task as widgets; a notebook without such a widget ignores it. `sources` tells `01_validate_landing_and_bronze` which landing/Bronze folders

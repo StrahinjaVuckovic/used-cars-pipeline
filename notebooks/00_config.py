@@ -28,6 +28,7 @@ GOLD_PATH = f"abfss://gold@{STORAGE_ACCOUNT}.dfs.core.windows.net"
 # catalog and schema. None means "no Unity Catalog" (local tests): views are then session-scoped temp views.
 UC_CATALOG = "dbw_used_cars_strahinja"
 UC_SILVER_SCHEMA = "silver"
+UC_GOLD_SCHEMA = "gold"
 
 # COMMAND ----------
 

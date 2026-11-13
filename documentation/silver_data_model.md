@@ -417,7 +417,8 @@ the official European Central Bank rates. It is a public API without a key, so t
 Vault. `providers=ecb` keeps only the ECB rates: without it the API blends other providers and also returns weekend
 values. ADF copies the raw response into `bronze/ExchangeRates/ingestion_date=YYYY-MM-DD/` – the only Bronze source
 that does not come from `landing`:
-- `rates_latest.json`: the daily call (latest ECB day);
+- `rates_latest.json`: the daily call, a **sliding window of the last 7 days** (`from` = today − 7, `to` = today;
+  ~6 working days × 3 currencies, starting with the last rate before `from`);
 - `rates_<from>_<to>.json`: a one-time history call from the first listing day to the day of the call
   (2020-01-01 → 2026-11-10; the listings' `posting_date` covers 2020-01-01 → 2024-12-31). Ending on the day of the
   call leaves no gap before the daily calls, and listings that arrive later with newer posting dates still find
@@ -438,14 +439,29 @@ that does not come from `landing`:
 
 - **History, not a snapshot:** a vehicle file holds every listing, so only its latest partition matters; an
   exchange rate response holds only new days, so the table is the sum of all partitions. A day that arrives more
-  than once (a Saturday call returns Friday again, the history file overlaps daily calls) is kept from the
-  **latest ingestion**.
+  than once (every daily window overlaps the previous ones, the history file overlaps daily calls) is kept from
+  the **latest ingestion**.
+- **Sliding window (since 2026-11-12):** the daily call asks for the last 7 days instead of only the latest day,
+  so gaps heal by themselves. Two cases seen on 2026-11-12 before the change:
+  - the history call ended with 2026-11-09 and the next daily call returned only 2026-11-11, so 2026-11-10 was
+    missing;
+  - a second master run on the same day overwrote `rates_latest.json` (2026-11-11) with the next ECB day
+    (2026-11-12); after a rebuild from Bronze, 2026-11-11 was missing as well.
+
+  With the window, every day missed while ADF did not run (up to ~6 days) or lost in an overwritten file comes
+  again with the next daily call. Longer outages still need a history call (`history_from` / `history_to`).
+  The window is a simpler alternative to a real watermark in ADF (reading the last loaded date before the call).
 - **Incremental load** (widget / Job parameter `load_mode=incremental`, the default):
   - **watermark** = the latest `ingestion_date` in the table (the latest ingestion always wins the deduplication,
     so it is always present);
   - only the Bronze partitions **from the watermark on** (`>=`) are read and deduplicated;
   - they are merged on (`rate_date`, `quote_currency`): new days are inserted; a known day is updated only by a
     newer ingestion, or by the same ingestion with another rate; every other row is left as it is.
+  - Because of the window, every daily run **refreshes** the ~12 rows of the previous working days it delivers
+    again (same rate, newer `ingestion_date`); the log says "rows refreshed by a newer ingestion". Updating only
+    rows whose rate changed would avoid that, but then the incremental table would keep the *first* ingestion
+    and a full load the *latest* one. Both load modes must give the same table (tested), so the newer ingestion
+    always wins.
   - The watermark partition is read again on purpose: a second master run on the same day overwrites
     `rates_latest.json` in the same folder, and with `>` its new content would be skipped. Merging an unchanged
     partition again inserts and updates nothing, so re-runs are idempotent.
@@ -459,8 +475,7 @@ that does not come from `landing`:
   - after a daily ADF copy (`ingestion_date=2026-11-12`, ECB day 2026-11-11): 2 partitions read, 3 rows inserted,
     0 updated, 5,277 rows (1,759 days × 3); the view used the 2026-11-11 rates.
   - 2026-11-10 is missing: the history call ended with 2026-11-09 and the next daily call returned 2026-11-11.
-    A history call of the pipeline (`history_from` / `history_to`) fills such a gap; an automatic sliding window
-    was judged a detail by the mentor.
+    This led to the sliding window above (the mentor called it a detail; added on the user's request).
 - **Full load** (`load_mode=full`, run by hand): every partition up to `ingestion_date`, overwrite. Used for a
   backfill (the table as it was on that day) or to rebuild the table after a fix.
 - **Checks stop the run before anything is written** (rates are reference data: one wrong rate makes every

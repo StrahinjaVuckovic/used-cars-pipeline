@@ -239,3 +239,47 @@ def test_incremental_run_for_a_date_before_the_watermark_loads_nothing(spark, tm
     assert namespace["notebook_exit_value"] == "nothing to load"
     assert table_version(spark, silver) == version
     assert len(table_rows(spark, silver)) == 6
+
+
+# ---------- sliding window (the daily call delivers the last 7 days) ----------
+
+
+def test_sliding_window_fills_a_missing_day(spark, tmp_path, catalog_untouched):
+    bronze, silver = tmp_path / "bronze", tmp_path / "silver"
+    # 2026-10-29 was missed (e.g. ADF did not run that day).
+    write_rates_partition(bronze, "2026-11-01", "rates_latest.json", day_rates("2026-10-28") + day_rates("2026-10-30"))
+    run_rates(spark, bronze, silver)
+
+    # The next daily response covers the last days again, including the missing one.
+    write_rates_partition(bronze, "2026-11-03", "rates_latest.json",
+                          day_rates("2026-10-28") + day_rates("2026-10-29") + day_rates("2026-10-30") + day_rates("2026-11-02"))
+    namespace = run_rates(spark, bronze, silver)
+
+    metrics = namespace["load_metrics"]
+    # Inserted: 10-29 and 11-02; refreshed with the newer ingestion: 10-28 and 10-30 (same rates).
+    assert (metrics["numTargetRowsInserted"], metrics["numTargetRowsUpdated"]) == (6, 6)
+    rows = table_rows(spark, silver)
+    assert len(rows) == 12
+    assert {str(r.ingestion_date) for r in rows.values()} == {"2026-11-03"}
+
+
+def test_incremental_and_full_load_give_the_same_table(spark, tmp_path, catalog_untouched):
+    """Daily incremental runs over overlapping windows must end in the table a full load builds from scratch."""
+    bronze = tmp_path / "bronze"
+    partitions = [
+        ("2026-11-01", day_rates("2026-10-28") + day_rates("2026-10-30")),
+        ("2026-11-03", day_rates("2026-10-29") + day_rates("2026-10-30", gbp=0.81) + day_rates("2026-11-02")),
+        ("2026-11-04", day_rates("2026-11-02") + day_rates("2026-11-03")),
+    ]
+    for ingestion_date, rows in partitions:
+        write_rates_partition(bronze, ingestion_date, "rates_latest.json", rows)
+        run_rates(spark, bronze, tmp_path / "silver_incremental")
+    run_rates(spark, bronze, tmp_path / "silver_full", load_mode="full")
+
+    columns = ["rate_date", "quote_currency", "rate", "ingestion_date", "source_file_path"]
+
+    def snapshot(silver):
+        return sorted(tuple(r) for r in read_rates(spark, silver).select(*columns).collect())
+
+    assert snapshot(tmp_path / "silver_incremental") == snapshot(tmp_path / "silver_full")
+    assert len(snapshot(tmp_path / "silver_full")) == 15

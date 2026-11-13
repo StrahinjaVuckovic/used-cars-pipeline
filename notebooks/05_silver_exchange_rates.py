@@ -13,16 +13,20 @@
 # MAGIC The ECB publishes rates on working days only, so weekends and holidays have no row.
 # MAGIC
 # MAGIC **History, not a snapshot.** A vehicle file is a full snapshot (the latest one is the truth), but every
-# MAGIC exchange rate response adds days to a history. The daily response holds the latest day; a one-time history
-# MAGIC response (`rates_<from>_<to>.json`) holds every day since the first listing. The same day can come from
-# MAGIC several responses (a Saturday run returns Friday again): the row of the latest ingestion is kept.
+# MAGIC exchange rate response adds days to a history. The daily response (`rates_latest.json`) holds the **last 7
+# MAGIC days** (sliding window); a one-time history response (`rates_<from>_<to>.json`) holds every day since the first
+# MAGIC listing. The same day therefore comes from several responses: the row of the latest ingestion is kept.
+# MAGIC The window makes gaps heal by themselves: a day missed while ADF did not run (up to ~6 days), or lost when a
+# MAGIC second run on the same day overwrote `rates_latest.json`, is delivered again by the next daily call.
 # MAGIC
 # MAGIC **Incremental load (default).** The watermark is the latest `ingestion_date` already in the table.
 # MAGIC Only the Bronze partitions from the watermark on are read and merged into the table on
 # MAGIC `(rate_date, quote_currency)`:
 # MAGIC - a new day is inserted;
 # MAGIC - a known day is updated only by a newer ingestion (or by the same ingestion with another rate, when ADF
-# MAGIC   copied the partition again on the same day);
+# MAGIC   copied the partition again on the same day). Because of the 7-day window every daily run refreshes the
+# MAGIC   ~12 rows of the previous working days it delivers again (same rate, newer `ingestion_date`), so a full load
+# MAGIC   and the incremental loads give the same table, lineage included;
 # MAGIC - all other rows stay as they are.
 # MAGIC
 # MAGIC The watermark partition itself is read again (`>=`, not `>`): a second master run on the same day
@@ -213,7 +217,8 @@ if EFFECTIVE_LOAD_MODE == "incremental":
     load_metrics = merge_delta_table(batch_df, TARGET_PATH, KEY_COLUMNS, MERGE_UPDATE_CONDITION)
     log.info(
         f"Merged into {TARGET_PATH}: {load_metrics.get('numTargetRowsInserted', 0)} rows inserted, "
-        f"{load_metrics.get('numTargetRowsUpdated', 0)} rows updated"
+        f"{load_metrics.get('numTargetRowsUpdated', 0)} rows refreshed by a newer ingestion "
+        "(days delivered again by the 7-day window, or a re-copy with another rate)"
     )
 else:
     # A few thousand rows: one file.

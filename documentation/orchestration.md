@@ -63,8 +63,13 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
 - **`pl_ingest_exchange_rates`:** linked service `ls_frankfurter_api` (HTTP, anonymous – a public API without a
   key, so nothing goes to Key Vault), source dataset HTTP + Binary, sink dataset Binary in
   `bronze/ExchangeRates/ingestion_date=<today>/`. Binary keeps the response byte for byte, like every Bronze
-  copy. Parameters `history_from` / `history_to` (empty = the daily call `rates_latest.json`, filled = a one-time
-  history call `rates_<from>_<to>.json`). Retry 3 × 60 s and a 10-minute timeout, because an external API can be
+  copy. Parameters `history_from` / `history_to`:
+  - empty = the daily call, a sliding window of the last 7 days, written as `rates_latest.json`. The source
+    dataset's `relative_url` is
+    `concat('v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb&from=', formatDateTime(addDays(utcNow(), -7), 'yyyy-MM-dd'), '&to=', formatDateTime(utcNow(), 'yyyy-MM-dd'))`.
+    The window repeats the last working days, so a day missed during a short ADF outage, or lost when a second run
+    on the same day overwrites the file, is delivered again (see `documentation/silver_data_model.md`);
+  - filled = a one-time history call `rates_<from>_<to>.json`. Retry 3 × 60 s and a 10-minute timeout, because an external API can be
   briefly unavailable or hang.
 
 ## Databricks Jobs

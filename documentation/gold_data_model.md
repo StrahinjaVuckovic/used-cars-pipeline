@@ -146,6 +146,26 @@ Vehicles without service history get no score (null = unknown), not 100.
 
 `dev_mode=true` writes `*_dev` tables and registers `*_dev` views.
 
+## Verified on the cluster (2026-11-13, Job `gold`, ID 626529156910056, full data)
+
+All 7 tasks succeeded in 10 min 53 s, most of it the cluster start (facts ~1.5 min each, views 29 s).
+
+| Table | Rows | Notes |
+|---|---|---|
+| `dim_date` | 29,586 | 29,585 days + Unknown |
+| `dim_vehicle` | 427,881 | 427,880 vehicles + Unknown; manufacturer Unknown 12,147; lookup 412,552, listing_url 3,181 (= Silver); 8,239 vehicles without service history |
+| `dim_location` / `dim_platform` / `dim_currency` / `dim_service_type` | 427 / 5 / 5 / 6 | with Unknown; only 5 service classifications exist |
+| `fact_listing` | 427,880 | 0 rows pointing to Unknown (every listing has a posting date, location, platform and currency) |
+| `fact_service_event` | 8,312,490 | cost total 178,572,463.59 EUR = Silver; Unknown vehicle 0; Unknown service date 228,999 (= Silver `invalid_service_date`) |
+| `fact_exchange_rate` | 7,044 | 1,761 days × 4 currencies |
+| `vw_listing_current_price` | 427,880 | at the rates of 2026-11-12 |
+
+Observations for the Reliability Score:
+- `cost_eur` and `downtime_days` are filled **only for REPAIR events** (99,848); maintenance (7,667,397),
+  inspection (524,936) and UNKNOWN (20,309) events have neither.
+- `dim_service_type` has only five classifications: BIG_SERVICE and ENGINE_WORK are INSPECTION / LOW,
+  OIL_CHANGE is MAINTENANCE / LOW, REPAIR is REPAIR / HIGH, BODY_WORK is UNKNOWN / MEDIUM.
+
 ## Example queries
 
 ```sql

@@ -32,7 +32,7 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
    ├─ silver_exchange_rates    Job activity  after silver_vehicle_listings: Succeeded
    │                                         and ingest_exchange_rates: Completed
    ├─ fx_ingest_failed         Fail activity after ingest_exchange_rates: Failed
-   └─ gold (to be added)       Job activity  after silver_service_events and silver_exchange_rates: Succeeded
+   └─ gold                     Job activity  after silver_service_events and silver_exchange_rates: Succeeded
 ```
 
 - **Jobs are started directly** with Databricks Job activities (mentor, 2026-11-10). The earlier one-activity
@@ -186,6 +186,22 @@ mentor confirms the setup.
   marked **Failed**.
 - The first dev test had no `jobParameters` on the `silver_exchange_rates` activity, so that Job ran with
   `dev_mode=false`; fixed before the runs above.
+
+## Verified (2026-11-13, ADF Debug of `pl_daily_master` with the `gold` Job activity, full data)
+
+`ingestion_date=latest`, `dev_mode=false`, warm cluster; every activity succeeded, `fx_ingest_failed` did not run.
+
+| Activity | Start | Duration |
+|---|---|---|
+| `ingest_bronze` | 11:21:36 | 39 s |
+| `ingest_exchange_rates` | 11:21:36 | 23 s |
+| `silver_vehicle_listings` | 11:22:15 | 4 min 10 s |
+| `silver_service_events` | 11:26:27 | 3 min 7 s |
+| `silver_exchange_rates` | 11:26:27 | 2 min 45 s |
+| `gold` (Job ID 626529156910056) | 11:29:36 | 3 min 5 s |
+
+The whole day, landing → Bronze → Silver → Gold star schema, takes **about 11 minutes** on a warm cluster (about
+5 minutes more when the cluster has to start, as in the nightly trigger run).
 
 ## Open questions for the mentor
 

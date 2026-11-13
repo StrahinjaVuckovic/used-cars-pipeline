@@ -476,6 +476,11 @@ that does not come from `landing`:
     0 updated, 5,277 rows (1,759 days × 3); the view used the 2026-11-11 rates.
   - 2026-11-10 is missing: the history call ended with 2026-11-09 and the next daily call returned 2026-11-11.
     This led to the sliding window above (the mentor called it a detail; added on the user's request).
+  - **Sliding window verified (2026-11-13):** the daily ADF copy (`ingestion_date=2026-11-13`, 949 bytes) returned
+    2026-11-06 → 2026-11-12 (the ECB rate of 2026-11-13 was not published yet). The Job read the partitions
+    `2026-11-12` and `2026-11-13` (18 raw rows → 15), inserted 6 rows (the missing 2026-11-10 and 2026-11-11) and
+    refreshed 9 (2026-11-06, -09, -12): 5,283 rows (1,761 days × 3) and no gap left. The API starts the series
+    with the last rate before `from` only when `from` is not a working day.
 - **Full load** (`load_mode=full`, run by hand): every partition up to `ingestion_date`, overwrite. Used for a
   backfill (the table as it was on that day) or to rebuild the table after a fix.
 - **Checks stop the run before anything is written** (rates are reference data: one wrong rate makes every

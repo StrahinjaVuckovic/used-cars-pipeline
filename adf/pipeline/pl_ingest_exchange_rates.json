@@ -39,7 +39,7 @@
                         "type": "DatasetReference",
                         "parameters": {
                             "relative_url": {
-                                "value": "@if(empty(pipeline().parameters.history_from), 'v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb', concat('v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb&from=', pipeline().parameters.history_from, '&to=', pipeline().parameters.history_to))",
+                                "value": "@if(empty(pipeline().parameters.history_from), concat('v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb&from=', formatDateTime(addDays(utcNow(), -7), 'yyyy-MM-dd'), '&to=', formatDateTime(utcNow(), 'yyyy-MM-dd')), concat('v2/rates?base=EUR&quotes=USD,GBP,AUD&providers=ecb&from=', pipeline().parameters.history_from, '&to=', pipeline().parameters.history_to))",
                                 "type": "Expression"
                             }
                         }

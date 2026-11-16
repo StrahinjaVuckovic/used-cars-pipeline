@@ -32,7 +32,8 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
    ├─ silver_exchange_rates    Job activity  after silver_vehicle_listings: Succeeded
    │                                         and ingest_exchange_rates: Completed
    ├─ fx_ingest_failed         Fail activity after ingest_exchange_rates: Failed
-   └─ gold                     Job activity  after silver_service_events and silver_exchange_rates: Succeeded
+   ├─ silver_dq (to be added)  Job activity  after silver_service_events and silver_exchange_rates: Succeeded
+   └─ gold                     Job activity  after silver_dq: Succeeded (to be re-pointed; today after both Silver Jobs)
 ```
 
 - **Jobs are started directly** with Databricks Job activities (mentor, 2026-11-10). The earlier one-activity
@@ -79,6 +80,7 @@ tr_daily_master  (schedule trigger, every day 02:00 Europe/Belgrade – created,
 | `silver_vehicle_listings` | `validate_landing_and_bronze` (sources=vehicle_listings) → 4 × `stage_<source>_source` and `brand_lookup` in parallel → `vehicle_listings` | `orchestration/databricks_job_silver_vehicle_listings.yml` |
 | `silver_service_events` | `validate_landing_and_bronze` (sources=service_book) → `service_events` | `orchestration/databricks_job_silver_service_events.yml` |
 | `silver_exchange_rates` | `exchange_rates` (05) → `vehicle_listings_priced` (06, creates the view) | `orchestration/databricks_job_silver_exchange_rates.yml` |
+| `silver_dq` | `dq_checks` (06_silver_dq_checks: table-level rules on all Silver tables, appends `silver/dq_results`, fails on an error rule; parameter `threshold_overrides`) | `orchestration/databricks_job_silver_dq.yml` |
 | `gold` | `dim_date`, `dim_vehicle`, `dim_small` (07, parallel) → `fact_listing`, `fact_service_event`, `fact_exchange_rate` (08, parallel) → `views` (08, Unity Catalog views `gold.<table>` and `vw_listing_current_price`) | `orchestration/databricks_job_gold.yml` |
 
 - Job parameters (`ingestion_date`, `dev_mode`, `sources`, and `load_mode` in `silver_exchange_rates`) reach every

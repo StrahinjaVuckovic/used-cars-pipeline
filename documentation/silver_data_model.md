@@ -16,6 +16,9 @@ Shared code: `notebooks/00_config.py` (storage access, paths, sources),
 `notebooks/utils/silver_transformations.py` (reusable cleaning functions) and
 `notebooks/utils/vehicle_listings_cleaning.py` (cleaning rules and checks shared by the four vehicle sources).
 
+Table-level data quality checks of the whole Silver layer (thresholds, history in `silver.dq_results`, gate
+before Gold): [`data_quality.md`](data_quality.md).
+
 ## Design principles
 
 - **One Silver table per business entity.** The four vehicle source systems describe the same entity

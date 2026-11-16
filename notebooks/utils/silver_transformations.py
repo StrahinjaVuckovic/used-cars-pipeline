@@ -238,6 +238,11 @@ def write_delta_table(df: DataFrame, path: str, num_files: int = None) -> None:
     df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
 
 
+def append_delta_table(df: DataFrame, path: str) -> None:
+    """Append rows to the Delta table at `path` (created on the first append); used for logs such as dq_results."""
+    df.write.format("delta").mode("append").save(path)
+
+
 def merge_delta_table(df: DataFrame, path: str, key_columns: list, update_condition: str = None) -> dict:
     """
     Upsert `df` into the Delta table at `path` (incremental load) and return the MERGE operation metrics.

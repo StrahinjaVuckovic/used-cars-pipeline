@@ -1,0 +1,35 @@
+# Databricks Job "silver_dq": table-level data quality checks of the Silver layer, the gate before Gold.
+#
+# Same format as the other Job definitions (Databricks Asset Bundle, "View as code" in the UI), with the notebook
+# path relative to this file instead of the personal workspace Git folder.
+#
+# Task graph:
+#   dq_checks (06_silver_dq_checks: rules on all Silver tables -> appends silver/dq_results, view silver.dq_results;
+#              fails when an error rule fails)
+#
+# The ADF master pipeline starts this Job after silver_service_events and silver_exchange_rates, and starts the
+# gold Job only when this one succeeded. Rules and thresholds: documentation/data_quality.md.
+# No schedule here: the Job is started by the ADF pipeline pl_daily_master.
+
+resources:
+  jobs:
+    silver_dq:
+      name: silver_dq
+      tasks:
+        - task_key: dq_checks
+          notebook_task:
+            notebook_path: ../notebooks/06_silver_dq_checks
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
+      # A run started while another is active waits in the queue instead of running in parallel.
+      queue:
+        enabled: true
+
+      parameters:
+        - name: dev_mode
+          default: "false"
+        - name: ingestion_date
+          default: latest
+        # JSON {"rule_name": threshold} to change thresholds for one run (negative tests); empty for daily runs.
+        - name: threshold_overrides
+          default: "{}"

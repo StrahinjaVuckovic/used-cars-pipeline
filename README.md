@@ -11,7 +11,7 @@ Business and Data Analysts, including a **Reliability Score (0–100)** per vehi
 Azure Data Factory: pl_daily_master (daily trigger 02:00, Europe/Belgrade)
 
 landing/ (6 source files) ─► ingest_bronze ─► silver_vehicle_listings ─┬─► silver_service_events ─┐
-                                                                        │                          ├─► gold
+                                                                        │                          ├─► silver_dq ─► gold
 Frankfurter API (ECB)     ─► ingest_exchange_rates ──(Completed)────────┴─► silver_exchange_rates ─┘
                                   └─(Failed)─► fx_ingest_failed (marks the day as failed)
 
@@ -72,7 +72,7 @@ notebooks/              Databricks notebooks (source format), numbered in execut
   00_config.py          storage access through the Key Vault-backed secret scope, paths, sources, logger
   01_…                  landing vs Bronze validation
   02_… – 06_…           Silver: one stage per vehicle source, brand lookup, union, service events,
-                        exchange rates (incremental MERGE), priced view
+                        exchange rates (incremental MERGE), priced view, data quality checks (gate before Gold)
   07_… – 09_…           Gold: dimensions, facts, Unity Catalog views, Reliability Score
   utils/                shared helpers (cleaning, data quality, Delta writes, Gold keys and weights)
   profiling/            read-only profiling notebooks behind the cleaning rules and the score
@@ -88,6 +88,7 @@ tests/                  pytest suite that runs the notebooks locally on samples 
    - `silver_vehicle_listings`: validate → 4 source stages + brand lookup in parallel → union;
    - `silver_service_events`;
    - `silver_exchange_rates`: runs even when the API copy failed (it then uses the last rates), while a Fail activity marks the day as failed;
+   - `silver_dq`: table-level data quality rules on all Silver tables; Gold starts only when no error rule failed;
    - `gold`: dimensions → facts and reliability → views.
 3. The whole day (landing → Gold) takes about **11 minutes** on a warm cluster and about 14 minutes including
    cluster start.
@@ -109,12 +110,19 @@ No credentials are stored in code or in git:
 
 ## Data quality
 
-Every notebook checks its own output and **stops the run** before writing when something is wrong:
+Three levels (details: [`documentation/data_quality.md`](documentation/data_quality.md)):
+
+- **per value:** an impossible value becomes null and is flagged in `dq_issues` / `is_valid`; rows are never deleted;
+- **before a write:** every notebook checks its own output and stops the run when something is wrong;
+- **whole Silver layer:** `06_silver_dq_checks` checks the Silver tables against thresholds every day (error rules
+  such as duplicate keys or stale rates, warning rules such as twice the usual share of invalid values), appends
+  every result to `silver.dq_results` and **gates Gold**: when an error rule fails, the Gold Job does not start.
+
+The checks before a write cover:
 - documented columns and unique keys;
 - foreign keys in Gold, and row counts and cost totals equal to Silver;
 - valid exchange rates and their age.
 
-Problems in single values do not stop the run: the value becomes null and is flagged in `dq_issues` / `is_valid`.
 Notebooks log timestamped progress lines (`get_logger`) into the Job task output.
 
 ## Local tests

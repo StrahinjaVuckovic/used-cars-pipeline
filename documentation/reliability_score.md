@@ -104,6 +104,22 @@ Simulated on the full local copy of the service book before implementation:
 
 Categories: Excellent 349,594, Good 36,642, Fair 16,418, Poor 16,987, Unknown 8,239 (no history).
 
+### Verified on the cluster (2026-11-16, full ADF master run, Job `gold` with the new task)
+
+427,880 rows; repair cost total 178,572,463.59 EUR = Silver; no vehicle with an odd number of repair rows and no
+service-book vehicle without a listing.
+
+| Repair incidents | Vehicles | Score min / avg / max |
+|---|---|---|
+| 0 | 386,356 | 70 / 96.5 / 100 |
+| 1 | 16,646 | 34 / 64.7 / 72.5 |
+| 2 | 16,639 | 0.3 / 32.9 / 44.3 |
+
+Categories: Excellent 349,594, Good 36,642, Fair 16,420, Poor 16,985, Unknown 8,239 – the simulation within a few
+vehicles (Silver now keeps fractional downtime). The five lowest scores (0.3–4) are vehicles with two failures
+(34–42 days of downtime), 3–4 skipped services and the maximum oil penalty. The average score per manufacturer is
+almost flat (91.6–93.9 for the 15 largest), so in this data the brand barely affects reliability.
+
 ## 4. Limitations and how to extend
 
 - The weights are a reasoned judgement, not learned from outcomes (there is no "breakdown after sale" data to

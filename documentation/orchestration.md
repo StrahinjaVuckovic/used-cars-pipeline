@@ -203,6 +203,13 @@ mentor confirms the setup.
 The whole day, landing → Bronze → Silver → Gold star schema, takes **about 11 minutes** on a warm cluster (about
 5 minutes more when the cluster has to start, as in the nightly trigger run).
 
+## Verified (2026-11-16, ADF Debug of `pl_daily_master`, Gold with the reliability task)
+
+Full data, cluster started by the run. `ingest_bronze` 52 s, `ingest_exchange_rates` 23 s, `silver_vehicle_listings`
+5 min 24 s (including the cluster start), `silver_service_events` 3 min 24 s, `silver_exchange_rates` 3 min 10 s,
+`gold` 4 min 16 s (8 tasks): about **14 minutes** from 10:07 to 10:21. The exchange rate window brought Friday
+2026-11-13 (3 rows inserted, 12 refreshed, 5,286 rows).
+
 ## Open questions for the mentor
 
 - Is "ADF starts Databricks Jobs" the split he meant, and should the vehicle files keep being copied landing →

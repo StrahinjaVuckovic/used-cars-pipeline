@@ -372,7 +372,7 @@ Only rows identical in every column are removed as duplicates (none in the 2026-
 | `oil_gap_km` | `oil_gap_km` | int | cast | — |
 | `oil_gap_penalty` | `oil_gap_penalty_piece` | double | cast | — |
 | `cost_eur` | `cost_eur` | decimal(10,2) | cast | — |
-| `downtime_days` | `downtime_days` | int | cast | — |
+| `downtime_days` | `downtime_days` | double | cast; fractions of a day are kept (90% of the values, e.g. 6.6) – it was an int until 2026-11-13, which cut them | — |
 | `notes` | `notes_raw` | string | trim | — |
 | `is_skipped_service` | `notes_raw` | boolean | `lower(notes) = 'skipped'` | — |
 | `ingestion_date` | Bronze folder name | date | lineage | — |

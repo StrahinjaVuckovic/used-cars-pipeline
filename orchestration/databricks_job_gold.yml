@@ -5,8 +5,9 @@
 #
 # Task graph:
 #   dim_date, dim_vehicle, dim_small                  (07: dimensions, in parallel)
-#    └─ fact_listing, fact_service_event, fact_exchange_rate   (08: facts, in parallel; each checks its foreign keys
-#        └─ views                                                against the dimensions written above)
+#    └─ fact_listing, fact_service_event, fact_exchange_rate,  (08/09: facts, in parallel; each checks its foreign
+#       fact_vehicle_reliability (needs dim_vehicle only)       keys against the dimensions written above)
+#        └─ views
 #                                                     (08_gold_views: Unity Catalog views gold.<table> and
 #                                                      vw_listing_current_price)
 #
@@ -59,11 +60,19 @@ resources:
             notebook_path: ../notebooks/08_gold_fact_exchange_rate
           existing_cluster_id: 1102-161746-o0vfiwmq
 
+        - task_key: fact_vehicle_reliability
+          depends_on:
+            - task_key: dim_vehicle
+          notebook_task:
+            notebook_path: ../notebooks/09_gold_fact_vehicle_reliability
+          existing_cluster_id: 1102-161746-o0vfiwmq
+
         - task_key: views
           depends_on:
             - task_key: fact_listing
             - task_key: fact_service_event
             - task_key: fact_exchange_rate
+            - task_key: fact_vehicle_reliability
           notebook_task:
             notebook_path: ../notebooks/08_gold_views
           existing_cluster_id: 1102-161746-o0vfiwmq

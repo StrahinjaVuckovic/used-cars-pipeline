@@ -22,7 +22,7 @@ DBML_PATH = PROJECT_ROOT / "documentation" / "gold_star_schema.dbml"
 GOLD_NOTEBOOKS = [  # order of the Gold Job: dimensions, facts, views
     "07_gold_dim_date.py", "07_gold_dim_vehicle.py", "07_gold_dim_small.py",
     "08_gold_fact_listing.py", "08_gold_fact_service_event.py", "08_gold_fact_exchange_rate.py",
-    "08_gold_views.py",
+    "09_gold_fact_vehicle_reliability.py", "08_gold_views.py",
 ]
 
 
@@ -125,8 +125,7 @@ def test_dbml_diagram_matches_the_code(helpers):
     documented = dbml_tables()
     for table, columns in helpers["GOLD_COLUMNS"].items():
         assert documented.get(table) == columns, f"{table}: .dbml {documented.get(table)} != code {columns}"
-    # The only documented table without code yet is the planned reliability fact.
-    assert set(documented) - set(helpers["GOLD_COLUMNS"]) == {"fact_vehicle_reliability"}
+    assert set(documented) == set(helpers["GOLD_COLUMNS"])
 
 
 # ---------- dim_date ----------

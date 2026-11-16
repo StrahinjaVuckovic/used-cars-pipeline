@@ -179,9 +179,9 @@ df = try_cast_columns(
         "prev_odometer_km": "int",
         "km_since_prev": "int",
         "oil_gap_km": "int",
-        "downtime_days": "int",
     },
 )
+# downtime_days stays double: 90% of the source values have a fraction of a day (6.6), an int would cut it.
 
 df = collect_dq_issues(df)
 df = add_lineage_columns(df, partition_date)

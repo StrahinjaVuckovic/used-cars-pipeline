@@ -74,7 +74,30 @@ GOLD_COLUMNS = {
         "is_skipped_service", "is_valid",
     ],
     "fact_exchange_rate": ["rate_date_key", "currency_key", "rate_per_eur"],
+    "fact_vehicle_reliability": [
+        "vehicle_key", "service_events", "maintenance_events", "repair_incidents", "repair_cost_eur",
+        "repair_downtime_days", "minor_repairs", "skipped_services", "oil_gap_penalty_total",
+        "repair_penalty", "minor_repair_penalty", "skipped_service_penalty", "oil_change_penalty",
+        "reliability_score", "reliability_category", "score_confidence",
+    ],
 }
+
+# Reliability Score (documentation/reliability_score.md): 100 minus explainable penalties, clamped to 0-100.
+RELIABILITY_WEIGHTS = {
+    "repair_incident": 25.0,          # per repair incident (diagnosis + fix rows = one incident)
+    "repair_downtime_day": 0.5,       # per day the vehicle was out of service because of repairs
+    "minor_repair": 5.0,              # per BODY_WORK event ("minor exterior repair")
+    "engine_inspection": 0.0,         # per ENGINE_WORK event ("major engine inspection"): an inspection, neutral
+    "skipped_service": 5.0,           # per skipped BIG_SERVICE ...
+    "skipped_service_max": 15.0,      # ... at most
+    "oil_gap_point": 0.5,             # per point of the source's oil_gap_penalty (late oil change) ...
+    "oil_gap_max": 10.0,              # ... at most
+}
+REPAIR_ROWS_PER_INCIDENT = 2  # the service book records each failure as a diagnosis row and a fix row
+# Lower bound of each category (score >= bound); vehicles without service history are "Unknown".
+RELIABILITY_CATEGORIES = [(90.0, "Excellent"), (75.0, "Good"), (50.0, "Fair"), (0.0, "Poor")]
+# Confidence of the score by number of service events: >= 15 High, >= 5 Medium, otherwise Low.
+SCORE_CONFIDENCE_EVENTS = [(15, "High"), (5, "Medium"), (1, "Low")]
 
 # COMMAND ----------
 

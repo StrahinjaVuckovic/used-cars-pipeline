@@ -16,7 +16,7 @@ EXPECTED_DTYPES = {
     "is_maintenance": "boolean", "is_repair": "boolean", "is_inspection": "boolean", "is_oil_change": "boolean",
     "interval_km_target": "int", "prev_odometer_km": "int", "km_since_prev": "int",
     "is_odometer_monotonic": "boolean", "oil_gap_km": "int", "oil_gap_penalty": "double",
-    "cost_eur": "decimal(10,2)", "downtime_days": "int", "notes": "string", "is_skipped_service": "boolean",
+    "cost_eur": "decimal(10,2)", "downtime_days": "double", "notes": "string", "is_skipped_service": "boolean",
     "ingestion_date": "date", "source_file_path": "string", "silver_processed_at": "timestamp",
     "dq_issues": "array<string>", "is_valid": "boolean",
 }
@@ -36,7 +36,7 @@ EDGE_CASE_ROWS = [
     # skipped big service
     "c1,2007-03-01,25000.0,INSPECTION,,LOW,UNKNOWN,False,1,0,1,0,0,,10026.0,14974.0,1,,0.0,,,Big Service,Skipped,big service skipped",
     # repair with cost and downtime
-    "c2,2010-05-05,120000.0,REPAIR,,HIGH,UNKNOWN,False,0,1,0,0,0,,100000.0,20000.0,1,,0.0,1234.56,5.0,repair,engine failure,repair engine failure",
+    "c2,2010-05-05,120000.0,REPAIR,,HIGH,UNKNOWN,False,0,1,0,0,0,,100000.0,20000.0,1,,0.0,1234.56,6.6,repair,engine failure,repair engine failure",
     # impossible dates
     "c2,1900-01-01,50000.0,MAINTENANCE,OIL/OIL_FILTER,LOW,UNKNOWN,False,1,0,0,0,1,15000.0,,,1,,0.0,,,Oil Change,,oil change",
     "c2,2101-02-01,60000.0,MAINTENANCE,OIL/OIL_FILTER,LOW,UNKNOWN,False,1,0,0,0,1,15000.0,,,1,,0.0,,,Oil Change,,oil change",
@@ -136,7 +136,7 @@ def test_skipped_service(edge_case_result):
 def test_repair_cost_and_downtime(edge_case_result):
     _, result = edge_case_result
     row = result.filter("event_type = 'REPAIR' AND vehicle_id = 'c2'").first()
-    assert row.cost_eur == Decimal("1234.56") and row.downtime_days == 5
+    assert row.cost_eur == Decimal("1234.56") and row.downtime_days == 6.6  # fraction kept
     assert row.severity == "HIGH" and row.is_repair is True
 
 

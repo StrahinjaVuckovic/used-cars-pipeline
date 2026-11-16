@@ -9,8 +9,8 @@ and analyst-friendly names in Unity Catalog.
   `notebooks/utils/gold_helpers.py` (checked by `tests/test_gold.py`).
 - Notebooks: `07_gold_dim_*` (dimensions), `08_gold_fact_*` (facts), `08_gold_views` (views), shared code in
   `notebooks/utils/gold_helpers.py`. Job: `orchestration/databricks_job_gold.yml`.
-- The Reliability Score (`fact_vehicle_reliability`) is part of the model but designed in its own step after
-  profiling the service book; the table is shown in the diagram as planned.
+- The Reliability Score (`fact_vehicle_reliability`, notebook `09_gold_fact_vehicle_reliability`) has its own
+  document: [`reliability_score.md`](reliability_score.md) (profiling, algorithm, weights, examples).
 
 ## Design decisions
 
@@ -43,7 +43,7 @@ erDiagram
     DIM_SERVICE_TYPE ||--o{ FACT_SERVICE_EVENT : service_type_key
     DIM_DATE ||--o{ FACT_EXCHANGE_RATE : rate_date_key
     DIM_CURRENCY ||--o{ FACT_EXCHANGE_RATE : currency_key
-    DIM_VEHICLE ||--o| FACT_VEHICLE_RELIABILITY : "vehicle_key (planned)"
+    DIM_VEHICLE ||--|| FACT_VEHICLE_RELIABILITY : vehicle_key
 ```
 
 The full diagram with all columns is in `gold_star_schema.dbml`.
@@ -133,9 +133,24 @@ Checks: same row count and the same `cost_eur` total as Silver, unique key, fore
 day, so any price converts with one join: `price / rate(listing currency) * rate(target)`.
 Checks: Silver rows + one EUR row per day, unique (`rate_date_key`, `currency_key`), foreign keys.
 
-### `gold.fact_vehicle_reliability` (planned)
-**Grain:** one vehicle. The score (0–100) and its components are defined in the Reliability Score step.
-Vehicles without service history get no score (null = unknown), not 100.
+### `gold.fact_vehicle_reliability`
+**Grain:** one vehicle of `dim_vehicle` (Unknown excluded). **Key:** `vehicle_key`. Input: `silver.service_events`
+(it has the skipped-service note and the odometer flag) and `dim_vehicle` for the keys.
+
+| Column | Rule |
+|---|---|
+| `service_events`, `maintenance_events` | all events; performed oil changes, big services and engine inspections |
+| `repair_incidents` | failures; a diagnosis row and a fix row are one incident (`ceil(repair rows / 2)`) |
+| `repair_cost_eur`, `repair_downtime_days` | totals of the repair rows |
+| `minor_repairs`, `skipped_services`, `oil_gap_penalty_total` | BODY_WORK events; skipped big services; late-oil-change points (valid odometer only) |
+| `repair_penalty`, `minor_repair_penalty`, `skipped_service_penalty`, `oil_change_penalty` | points taken off per component (null without service history) |
+| `reliability_score` | 0–100 = 100 minus the penalties, one decimal; null without service history |
+| `reliability_category` | Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor, Unknown |
+| `score_confidence` | High ≥ 15 events, Medium ≥ 5, Low, Unknown |
+
+Algorithm and the reasons for every weight: [`reliability_score.md`](reliability_score.md). Checks: one row per
+vehicle, unique key, foreign key, score within 0–100, null score only without history, repair cost total equal
+to Silver.
 
 ## Views
 
@@ -191,7 +206,8 @@ silver.vehicle_listings ─┬─► 07_gold_dim_vehicle ─┐
 silver.service_events ───┼─► 07_gold_dim_small ───┤
 (generated) ─────────────┴─► 07_gold_dim_date ────┼─► 08_gold_fact_listing ───────┐
 silver.exchange_rates ────────────────────────────┼─► 08_gold_fact_service_event ─┼─► 08_gold_views
-                                                  └─► 08_gold_fact_exchange_rate ─┘
+                                                  ├─► 08_gold_fact_exchange_rate ─┤
+silver.service_events + dim_vehicle ──────────────┴─► 09_gold_fact_vehicle_reliability ┘
 ```
 
 Databricks Job `gold` (parameters `dev_mode`, `ingestion_date`), started by `pl_daily_master` after the Silver Jobs.

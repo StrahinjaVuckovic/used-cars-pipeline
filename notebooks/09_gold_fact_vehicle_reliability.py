@@ -1,0 +1,225 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # 09 – Gold: fact_vehicle_reliability (Reliability Score 0–100)
+# MAGIC
+# MAGIC **Grain:** one vehicle of `dim_vehicle` (Unknown member excluded). One row per vehicle with the service-book
+# MAGIC summary, the points each component takes away and the **Reliability Score**. The algorithm and the profiling
+# MAGIC behind every weight are in `documentation/reliability_score.md`; the weights are `RELIABILITY_WEIGHTS` in
+# MAGIC `utils/gold_helpers`.
+# MAGIC
+# MAGIC ```
+# MAGIC score = clamp(0, 100, 100
+# MAGIC     - (25 x repair incidents + 0.5 x repair downtime days)     repairs: the main penalty
+# MAGIC     - (5 x BODY_WORK + 0 x ENGINE_WORK)                        minor issues (an engine inspection is neutral)
+# MAGIC     - min(15, 5 x skipped big services)                         maintenance discipline
+# MAGIC     - min(10, 0.5 x oil_gap_penalty))                           late oil changes (valid odometer only)
+# MAGIC ```
+# MAGIC
+# MAGIC - Only regular maintenance → 100; frequent repairs → lowest (brief).
+# MAGIC - A repair incident is recorded as two rows (diagnosis + fix), so incidents = ceil(repair rows / 2).
+# MAGIC - Vehicles without service history get **no score** (null, category "Unknown"), not 100: there is no evidence.
+# MAGIC - `score_confidence` grows with the number of service events (High ≥ 15, Medium ≥ 5, Low).
+# MAGIC
+# MAGIC Input: `silver.service_events` (it has the skipped-service note and the odometer flag that `fact_service_event`
+# MAGIC does not carry) and `gold.dim_vehicle` for the keys.
+# MAGIC
+# MAGIC **Widgets:** `dev_mode` (`true` reads the `_dev` tables and writes `fact_vehicle_reliability_dev`),
+# MAGIC `ingestion_date` (not used).
+
+# COMMAND ----------
+
+# MAGIC %run ./00_config
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/silver_transformations
+
+# COMMAND ----------
+
+# MAGIC %run ./utils/gold_helpers
+
+# COMMAND ----------
+
+dbutils.widgets.dropdown("dev_mode", "true", ["true", "false"])
+DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
+TABLE_NAME = "fact_vehicle_reliability"
+
+log = get_logger("09_gold_fact_vehicle_reliability")
+log.info(f"dev_mode={DEV_MODE}, weights={RELIABILITY_WEIGHTS}")
+
+# COMMAND ----------
+
+
+def vehicle_service_summary(service_events_df: DataFrame) -> DataFrame:
+    """The service-book facts per vehicle that the score is built from."""
+    is_type = lambda t: F.col("service_type") == t  # noqa: E731
+    is_repair = F.coalesce(F.col("is_repair"), F.lit(False))
+    skipped = F.coalesce(F.col("is_skipped_service"), F.lit(False))
+    performed_maintenance = (is_type("OIL_CHANGE") | is_type("BIG_SERVICE") | is_type("ENGINE_WORK")) & ~skipped
+    trusted_odometer = F.coalesce(F.col("is_odometer_monotonic"), F.lit(False))
+    count_if = lambda condition: F.sum(F.when(condition, 1).otherwise(0)).cast("int")  # noqa: E731
+    return service_events_df.groupBy("vehicle_id").agg(
+        F.count("*").cast("int").alias("service_events"),
+        count_if(performed_maintenance).alias("maintenance_events"),
+        count_if(is_repair).alias("repair_events"),
+        F.coalesce(F.sum(F.when(is_repair, F.col("cost_eur"))), F.lit(0)).cast("decimal(12,2)").alias("repair_cost_eur"),
+        F.coalesce(F.sum(F.when(is_repair, F.col("downtime_days"))), F.lit(0.0)).cast("double").alias("repair_downtime_days"),
+        count_if(is_type("BODY_WORK")).alias("minor_repairs"),
+        count_if(is_type("ENGINE_WORK")).alias("engine_inspections"),
+        count_if(skipped).alias("skipped_services"),
+        F.coalesce(F.sum(F.when(trusted_odometer, F.col("oil_gap_penalty"))), F.lit(0.0)).cast("double").alias("oil_gap_penalty_total"),
+    ).withColumn(
+        "repair_incidents", F.ceil(F.col("repair_events") / REPAIR_ROWS_PER_INCIDENT).cast("int")
+    )
+
+
+def category_of(score: Column) -> Column:
+    expr = F.when(score.isNull(), F.lit(UNKNOWN_LABEL))
+    for lower_bound, label in RELIABILITY_CATEGORIES:
+        expr = expr.when(score >= lower_bound, F.lit(label))
+    return expr
+
+
+def confidence_of(events: Column) -> Column:
+    expr = F.when(events.isNull() | (events == 0), F.lit(UNKNOWN_LABEL))
+    for min_events, label in SCORE_CONFIDENCE_EVENTS:
+        expr = expr.when(events >= min_events, F.lit(label))
+    return expr
+
+
+def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFrame:
+    """One row per vehicle of dim_vehicle: components, penalties, score, category, confidence."""
+    w = RELIABILITY_WEIGHTS
+    vehicles = dim_vehicle_df.filter(F.col("vehicle_key") != UNKNOWN_KEY).select("vehicle_key")
+    summary = summary_df.withColumn("vehicle_key", surrogate_key("vehicle_id"))
+    joined = vehicles.join(summary, "vehicle_key", "left")
+    has_history = F.coalesce(F.col("service_events"), F.lit(0)) > 0
+
+    def penalty(value: Column) -> Column:
+        return F.when(has_history, value.cast("double"))
+
+    repair_penalty = penalty(w["repair_incident"] * F.col("repair_incidents") + w["repair_downtime_day"] * F.col("repair_downtime_days"))
+    minor_penalty = penalty(w["minor_repair"] * F.col("minor_repairs") + w["engine_inspection"] * F.col("engine_inspections"))
+    skipped_penalty = penalty(F.least(F.lit(w["skipped_service_max"]), w["skipped_service"] * F.col("skipped_services")))
+    oil_penalty = penalty(F.least(F.lit(w["oil_gap_max"]), w["oil_gap_point"] * F.col("oil_gap_penalty_total")))
+
+    scored = joined.select(
+        "vehicle_key",
+        *[F.coalesce(F.col(c), F.lit(0)).cast("int").alias(c) for c in
+          ["service_events", "maintenance_events", "repair_incidents"]],
+        F.coalesce("repair_cost_eur", F.lit(0)).cast("decimal(12,2)").alias("repair_cost_eur"),
+        F.coalesce("repair_downtime_days", F.lit(0.0)).alias("repair_downtime_days"),
+        *[F.coalesce(F.col(c), F.lit(0)).cast("int").alias(c) for c in ["minor_repairs", "skipped_services"]],
+        F.coalesce("oil_gap_penalty_total", F.lit(0.0)).alias("oil_gap_penalty_total"),
+        repair_penalty.alias("repair_penalty"),
+        minor_penalty.alias("minor_repair_penalty"),
+        skipped_penalty.alias("skipped_service_penalty"),
+        oil_penalty.alias("oil_change_penalty"),
+    )
+    total_penalty = (
+        F.col("repair_penalty") + F.col("minor_repair_penalty") + F.col("skipped_service_penalty") + F.col("oil_change_penalty")
+    )
+    # least/greatest skip nulls (least(100, null) = 100), so a vehicle without history must be null explicitly.
+    score = F.when(
+        total_penalty.isNotNull(),
+        F.round(F.greatest(F.lit(0.0), F.least(F.lit(100.0), F.lit(100.0) - total_penalty)), 1),
+    )
+    return (
+        scored.withColumn("reliability_score", score)
+        .withColumn("reliability_category", category_of(F.col("reliability_score")))
+        .withColumn("score_confidence", confidence_of(F.col("service_events")))
+        .select(*GOLD_COLUMNS[TABLE_NAME])
+    )
+
+
+# COMMAND ----------
+
+service_events_df = read_required_table(silver_path("service_events", DEV_MODE), "04_silver_service_events")
+dim_vehicle_df = read_required_table(gold_path("dim_vehicle", DEV_MODE), "07_gold_dim_vehicle")
+
+summary_df = vehicle_service_summary(service_events_df).cache()
+reliability = score_vehicles(summary_df, dim_vehicle_df).cache()
+
+# COMMAND ----------
+
+# MAGIC %md ## Checks
+
+# COMMAND ----------
+
+vehicle_count = dim_vehicle_df.filter(F.col("vehicle_key") != UNKNOWN_KEY).count()
+row_count = reliability.count()
+assert row_count == vehicle_count, f"{TABLE_NAME}: {row_count} rows, dim_vehicle has {vehicle_count} vehicles"
+assert_unique(reliability, ["vehicle_key"], TABLE_NAME)
+assert_foreign_key(reliability, "vehicle_key", dim_vehicle_df, "vehicle_key", TABLE_NAME)
+
+out_of_range = reliability.filter((F.col("reliability_score") < 0) | (F.col("reliability_score") > 100)).count()
+assert out_of_range == 0, f"{TABLE_NAME}: {out_of_range} scores outside 0-100"
+null_mismatch = reliability.filter(F.col("reliability_score").isNull() != (F.col("service_events") == 0)).count()
+assert null_mismatch == 0, f"{TABLE_NAME}: {null_mismatch} rows where a missing score does not mean 'no service history'"
+
+# The per-vehicle summary must keep every repair euro of Silver.
+silver_cost = service_events_df.filter(F.coalesce(F.col("is_repair"), F.lit(False))).agg(F.sum("cost_eur")).first()[0] or 0
+summary_cost = summary_df.agg(F.sum("repair_cost_eur")).first()[0] or 0
+assert summary_cost == silver_cost, f"{TABLE_NAME}: repair cost {summary_cost} != Silver {silver_cost}"
+
+odd_repairs = summary_df.filter(F.col("repair_events") % REPAIR_ROWS_PER_INCIDENT != 0).count()
+if odd_repairs:
+    log.warning(f"{odd_repairs} vehicles have an odd number of repair rows (a diagnosis without its fix, or the reverse)")
+unmatched = summary_df.join(reliability.select("vehicle_key"),
+                            surrogate_key("vehicle_id") == F.col("vehicle_key"), "left_anti").count()
+if unmatched:
+    log.warning(f"{unmatched} service-book vehicles have no listing and get no row (expected 0 on the full data)")
+
+log.info(f"{TABLE_NAME}: {row_count} vehicles, checks passed; repair cost total {summary_cost} equal to Silver")
+
+path = write_gold_table(reliability, TABLE_NAME, DEV_MODE)
+log.info(f"Written {row_count} rows to {path}")
+
+# COMMAND ----------
+
+# MAGIC %md ## Report
+
+# COMMAND ----------
+
+# Vehicles per category and confidence.
+display(
+    reliability.groupBy("reliability_category", "score_confidence").count()
+    .orderBy("reliability_category", "score_confidence")
+)
+
+# COMMAND ----------
+
+# The score separates vehicles by the number of repair incidents (vehicles without history excluded).
+display(
+    reliability.filter(F.col("reliability_score").isNotNull())
+    .groupBy("repair_incidents")
+    .agg(
+        F.count("*").alias("vehicles"),
+        F.min("reliability_score").alias("min_score"),
+        F.round(F.avg("reliability_score"), 1).alias("avg_score"),
+        F.max("reliability_score").alias("max_score"),
+    )
+    .orderBy("repair_incidents")
+)
+
+# COMMAND ----------
+
+# Average score per manufacturer (15 manufacturers with the most scored vehicles).
+display(
+    reliability.filter(F.col("reliability_score").isNotNull())
+    .join(read_delta_table(gold_path("dim_vehicle", DEV_MODE)), "vehicle_key")
+    .groupBy("manufacturer")
+    .agg(F.count("*").alias("vehicles"), F.round(F.avg("reliability_score"), 1).alias("avg_score"))
+    .orderBy(F.desc("vehicles"))
+    .limit(15)
+)
+
+# COMMAND ----------
+
+# The five lowest scores with their components.
+display(reliability.filter(F.col("reliability_score").isNotNull()).orderBy("reliability_score").limit(5))
+
+# COMMAND ----------
+
+_ = summary_df.unpersist()
+_ = reliability.unpersist()

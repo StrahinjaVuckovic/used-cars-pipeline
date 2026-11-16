@@ -10,7 +10,7 @@
 # MAGIC | `dim_location` | state + region | distinct values of `silver.vehicle_listings` |
 # MAGIC | `dim_platform` | listing platform | distinct `platform_id` / `platform_name` of `silver.vehicle_listings` |
 # MAGIC | `dim_currency` | currency | fixed list `CURRENCY_NAMES` (the currencies Silver accepts) |
-# MAGIC | `dim_service_type` | each distinct classification of a service event (junk dimension) | `silver.service_events` |
+# MAGIC | `dim_service_type` | each distinct classification of a service event, incl. the kind of failure from the repair notes (junk dimension) | `silver.service_events` |
 # MAGIC
 # MAGIC Keys are `xxhash64` of the natural key columns (`utils/gold_helpers`), computed on the Silver values before
 # MAGIC they are made readable, so the fact notebooks get the same keys from the same columns.
@@ -75,13 +75,15 @@ def build_dim_currency() -> DataFrame:
 
 def build_dim_service_type(service_events_df: DataFrame) -> DataFrame:
     flags = ["is_maintenance", "is_repair", "is_inspection", "is_oil_change"]
-    texts = [c for c in SERVICE_TYPE_KEY_COLUMNS if c not in flags]
+    texts = [c for c in SERVICE_TYPE_KEY_COLUMNS if c not in flags and c != "failure_type"]
     service_types = (
-        service_events_df.select(*SERVICE_TYPE_KEY_COLUMNS).distinct()
+        # failure_type (kind of failure, from the repair notes) splits REPAIR into its kinds.
+        with_failure_type(service_events_df).select(*SERVICE_TYPE_KEY_COLUMNS).distinct()
         .select(
             surrogate_key(*SERVICE_TYPE_KEY_COLUMNS).alias("service_type_key"),
             *[F.coalesce(c, F.lit(UNKNOWN_LABEL)).alias(c) for c in texts],
             *flags,
+            failure_type_display_name("failure_type").alias("failure_type"),
         )
     )
     return with_unknown_member(service_types, "service_type_key")

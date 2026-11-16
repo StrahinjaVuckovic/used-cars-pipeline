@@ -73,6 +73,7 @@ Table dim_service_type [headercolor: #3498DB] {
   is_repair boolean
   is_inspection boolean
   is_oil_change boolean
+  failure_type varchar [note: 'Engine Failure / Transmission / Head Gasket / Other (from the repair notes); No Failure']
   Note: 'Junk dimension: each distinct combination of the service classification columns.'
 }
 
@@ -130,12 +131,16 @@ Table fact_vehicle_reliability [headercolor: #E67E22] {
   service_events int
   maintenance_events int [note: 'performed oil changes, big services and engine inspections']
   repair_incidents int [note: 'failures; diagnosis + fix rows = one incident']
+  engine_failure_incidents int
+  transmission_incidents int
+  head_gasket_incidents int
+  other_failure_incidents int [note: 'repairs whose notes match no known kind']
   repair_cost_eur "decimal(12,2)"
   repair_downtime_days double
   minor_repairs int [note: 'BODY_WORK (minor exterior repair)']
   skipped_services int [note: 'big services marked skipped']
   oil_gap_penalty_total double [note: 'late oil changes, rows with a valid odometer only']
-  repair_penalty double [note: '25 x incidents + 0.5 x downtime days']
+  repair_penalty double [note: '35 engine / 30 transmission / 20 head gasket / 25 other per incident + 0.5 x downtime days']
   minor_repair_penalty double [note: '5 x minor repairs (engine inspection 0)']
   skipped_service_penalty double [note: 'min(15, 5 x skipped services)']
   oil_change_penalty double [note: 'min(10, 0.5 x oil gap penalty)']

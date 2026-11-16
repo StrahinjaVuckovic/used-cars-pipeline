@@ -54,7 +54,8 @@ The score starts at 100 and loses points for explainable reasons:
 ```
 reliability_score = clamp(0, 100,
       100
-    − repair_penalty           = 25 × repair_incidents + 0.5 × repair_downtime_days
+    − repair_penalty           = Σ penalty(kind) × incidents of that kind + 0.5 × repair_downtime_days
+                                 kind: engine failure 35, transmission 30, head gasket 20, other 25
     − minor_repair_penalty     = 5 × BODY_WORK events + 0 × ENGINE_WORK events
     − skipped_service_penalty  = min(15, 5 × skipped big services)
     − oil_change_penalty       = min(10, 0.5 × oil_gap_penalty)          rows with a valid odometer only
@@ -63,20 +64,45 @@ reliability_score = clamp(0, 100,
 
 Rounded to one decimal. Every component and penalty is a column of the table, so each score can be explained.
 
+### Kind of failure
+
+`severity` is HIGH for every repair, so it cannot tell failures apart, but the **notes** of each repair row name the
+failure. Both rows of an incident (diagnosis and fix) name the same kind, and a vehicle with two failures had the
+same failure twice (6 combinations, about 5,500 vehicles each).
+
+| Kind | Notes (diagnosis → fix) | Repair rows | Cost / incident | Downtime / incident | Penalty |
+|---|---|---|---|---|---|
+| Engine failure | "engine failure; engine replace recommended" → "engine replaced; timing belt and coolant renewed" | 32,878 | 4,747 EUR | 17.0 days | **35** |
+| Transmission | "transmission failure; gearbox slipping" → "transmission replaced; atf filled and adaptation performed" | 33,634 | 3,997 EUR | 15.5 days | **30** |
+| Head gasket | "engine overheat; head gasket suspected; vehicle towed" → "head gasket replaced; coolant system flushed" | 33,336 | 1,999 EUR | 8.5 days | **20** |
+| Other (unknown notes) | – | 0 | – | – | **25** + a warning in the log |
+
+The kind is recognized by `failure_type` in `notebooks/utils/gold_helpers.py` with the patterns `transmission`,
+`head gasket|overheat` and `engine fail|engine replace`, checked in this order ("engine overheat" is a head gasket
+failure, not an engine failure). Only repair rows are matched against the text (~1% of the events). The kind is
+also the column `failure_type` of `gold.dim_service_type`, so analysts can count, for example, transmission failures
+per manufacturer.
+
+Before the kind was used (version 1, verified 2026-11-16), every failure cost 25 and only the downtime separated
+them: an engine failure took about 4 points more than a head gasket. Now the order follows the data (cost and
+downtime), and the steps are rounded so they can be read and explained; the average penalty (~28) stays close to 25.
+
+### Weights
+
 | Weight | Value | Why |
 |---|---|---|
-| Repair incident | 25 | The brief puts "frequent non-maintenance issues" at the bottom: one failure takes a vehicle out of the top categories, two put it in the lowest. |
-| Repair downtime | 0.5 per day | Separates heavy failures (engine replaced, ~8.5 days per row) from light ones (head gasket, ~3.5). Downtime is chosen over cost because cost in EUR follows the kind of failure and adds nothing, while downtime is what hurts an owner (vehicle out of use). |
+| Failure | 35 / 30 / 20 (other 25) | The brief puts "frequent non-maintenance issues" at the bottom. One failure takes a vehicle out of the top categories, two put it in the lowest; a heavier failure takes more. |
+| Repair downtime | 0.5 per day | Within a kind, a longer stay in the workshop means a worse failure; downtime is what hurts an owner (vehicle out of use). |
 | Minor repair (BODY_WORK) | 5 | Not maintenance, but not a mechanical failure either. |
 | Engine inspection | 0 | An inspection, not a failure (evidence above). |
-| Skipped big service | 5, max 15 | Poor maintenance discipline lowers the score, but never as much as a failure. |
+| Skipped big service | 5, max 15 | Poor maintenance discipline lowers the score, but never as much as a heavy failure. |
 | Late oil change | 0.5 per point, max 10 | Uses the source's own lateness measure; the cap keeps impossible odometer jumps from destroying a score; rows with a non-monotonic odometer are ignored. |
 
 The maintenance penalties are capped (15 + 10), so poor maintenance alone costs at most 25 points plus 5 per body
-repair, while one failure costs 25 plus its downtime (at least ~27.5 on the data). The groups therefore barely
-overlap: on the full data vehicles without a failure score 70–100, with one failure 34–72.4 (only the best
-one-failure vehicles, with short downtime and perfect maintenance, reach the worst no-failure vehicles), and with
-two failures 0–44.
+repair. One head gasket failure (20 + ~4 for downtime) costs about as much, so **a vehicle with one repaired head
+gasket and good maintenance (~77, Good) can rank above a vehicle without failures but with very poor maintenance
+(70)**. This is intended: a repaired head gasket is a smaller problem than neglected maintenance at its worst.
+Engine and transmission failures always rank below every vehicle without failures.
 
 **Categories:** Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor < 50. **Confidence** by the number of service events:
 High ≥ 15, Medium ≥ 5, Low below. **Vehicles without service history** get no score (null), category and
@@ -88,36 +114,30 @@ confidence "Unknown" – no evidence is not the same as perfect reliability.
 |---|---|---|---|
 | A | 20 oil changes on time, 2 big services | 0 | **100** (Excellent) |
 | B | regular oil changes, one big service skipped, oil penalty points 8 | 5 + 4 | **91** (Excellent) |
-| C | one transmission failure (diagnosis 7.0 + fix 8.0 days) | 25 + 7.5 | **67.5** (Fair) |
-| D | engine failure and head gasket (2 incidents, 30 days), one body repair | 50 + 15 + 5 | **30** (Poor) |
-| E | no service events | – | **null** (Unknown) |
+| C | one head gasket failure (diagnosis 5.0 + fix 3.5 days) | 20 + 4.25 | **75.8** (Good) |
+| D | one transmission failure (diagnosis 7.0 + fix 8.5 days) | 30 + 7.75 | **62.3** (Fair) |
+| E | engine failed twice (34 days in total), one body repair | 70 + 17 + 5 | **8** (Poor) |
+| F | no service events | – | **null** (Unknown) |
 
-## 3. Expected distribution
+## 3. Distribution
 
-Simulated on the full local copy of the service book before implementation:
+Simulated on the full local copy of the service book (version 2, with the kind of failure):
 
 | Repair incidents | Vehicles | Score min / avg / max |
 |---|---|---|
 | 0 | 386,356 | 70 / 96.5 / 100 |
-| 1 | 16,646 | 34 / 64.7 / 72 |
-| 2 | 16,639 | 0.3 / 32.9 / 44 |
+| 1 | 16,646 | 24 / 61.3 / 77.4 |
+| 2 | 16,639 | 0 / 26.4 / 54.3 |
 
-Categories: Excellent 349,594, Good 36,642, Fair 16,418, Poor 16,987, Unknown 8,239 (no history).
+One failure, by kind: engine failure 24–60 (average 52.9), transmission 32–65 (58.8), head gasket 45–77 (72.3).
+Categories: Excellent 349,594, Good 39,141, Fair 15,506, Poor 15,400, Unknown 8,239 (no history).
 
-### Verified on the cluster (2026-11-16, full ADF master run, Job `gold` with the new task)
+### Version 1 verified on the cluster (2026-11-16, flat 25 per failure)
 
 427,880 rows; repair cost total 178,572,463.59 EUR = Silver; no vehicle with an odd number of repair rows and no
-service-book vehicle without a listing.
-
-| Repair incidents | Vehicles | Score min / avg / max |
-|---|---|---|
-| 0 | 386,356 | 70 / 96.5 / 100 |
-| 1 | 16,646 | 34 / 64.7 / 72.5 |
-| 2 | 16,639 | 0.3 / 32.9 / 44.3 |
-
-Categories: Excellent 349,594, Good 36,642, Fair 16,420, Poor 16,985, Unknown 8,239 – the simulation within a few
-vehicles (Silver now keeps fractional downtime). The five lowest scores (0.3–4) are vehicles with two failures
-(34–42 days of downtime), 3–4 skipped services and the maximum oil penalty. The average score per manufacturer is
+service-book vehicle without a listing. By incidents: 0 → 70 / 96.5 / 100, 1 → 34 / 64.7 / 72.5,
+2 → 0.3 / 32.9 / 44.3. Categories: Excellent 349,594, Good 36,642, Fair 16,420, Poor 16,985, Unknown 8,239 (the
+simulation within a few vehicles; Silver now keeps fractional downtime). The average score per manufacturer is
 almost flat (91.6–93.9 for the 15 largest), so in this data the brand barely affects reliability.
 
 ## 4. Limitations and how to extend

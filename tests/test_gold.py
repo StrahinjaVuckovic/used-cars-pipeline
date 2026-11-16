@@ -85,6 +85,31 @@ def test_manufacturer_display_names(spark, helpers):
     assert names == ["Toyota", "BMW", "Mercedes-Benz", "Land Rover", "Unknown"]
 
 
+@pytest.mark.parametrize(
+    "notes, is_repair, expected",
+    [
+        ("engine failure; engine replace recommended", True, "engine_failure"),
+        ("engine replaced; timing belt and coolant renewed", True, "engine_failure"),
+        ("transmission failure; gearbox slipping", True, "transmission"),
+        ("transmission replaced; atf filled and adaptation performed", True, "transmission"),
+        ("engine overheat; head gasket suspected; vehicle towed", True, "head_gasket"),
+        ("head gasket replaced; coolant system flushed", True, "head_gasket"),
+        ("something new", True, "other"),
+        (None, True, "other"),
+        ("Major engine inspection", False, None),  # not a repair
+    ],
+)
+def test_failure_type_from_the_repair_notes(spark, helpers, notes, is_repair, expected):
+    df = spark.createDataFrame([(notes, is_repair)], "notes STRING, is_repair BOOLEAN")
+    assert df.select(helpers["failure_type"]("notes", "is_repair").alias("k")).first().k == expected
+
+
+def test_failure_type_display_names(spark, helpers):
+    df = spark.createDataFrame([("engine_failure",), ("head_gasket",), ("other",), (None,)], "k STRING")
+    names = [r.n for r in df.select(helpers["failure_type_display_name"]("k").alias("n")).collect()]
+    assert names == ["Engine Failure", "Head Gasket", "Other", "No Failure"]
+
+
 def test_unknown_member_row(spark, helpers):
     dim = spark.createDataFrame([(5, "x", 1)], "k BIGINT, label STRING, n INT")
     unknown = helpers["with_unknown_member"](dim, "k").filter("k = -1").first()

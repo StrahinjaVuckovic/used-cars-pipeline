@@ -9,14 +9,17 @@
 # MAGIC
 # MAGIC ```
 # MAGIC score = clamp(0, 100, 100
-# MAGIC     - (25 x repair incidents + 0.5 x repair downtime days)     repairs: the main penalty
+# MAGIC     - (35 x engine failures + 30 x transmission failures       repairs: the main penalty, by kind of failure
+# MAGIC        + 20 x head gasket failures + 25 x other failures      (recognized from the repair notes)
+# MAGIC        + 0.5 x repair downtime days)
 # MAGIC     - (5 x BODY_WORK + 0 x ENGINE_WORK)                        minor issues (an engine inspection is neutral)
 # MAGIC     - min(15, 5 x skipped big services)                         maintenance discipline
 # MAGIC     - min(10, 0.5 x oil_gap_penalty))                           late oil changes (valid odometer only)
 # MAGIC ```
 # MAGIC
 # MAGIC - Only regular maintenance → 100; frequent repairs → lowest (brief).
-# MAGIC - A repair incident is recorded as two rows (diagnosis + fix), so incidents = ceil(repair rows / 2).
+# MAGIC - A repair incident is recorded as two rows (diagnosis + fix) of the same kind, so incidents per kind =
+# MAGIC   ceil(repair rows of that kind / 2). The kind comes from the notes (`failure_type` in `utils/gold_helpers`).
 # MAGIC - Vehicles without service history get **no score** (null, category "Unknown"), not 100: there is no evidence.
 # MAGIC - `score_confidence` grows with the number of service events (High ≥ 15, Medium ≥ 5, Low).
 # MAGIC
@@ -45,7 +48,17 @@ DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
 TABLE_NAME = "fact_vehicle_reliability"
 
 log = get_logger("09_gold_fact_vehicle_reliability")
-log.info(f"dev_mode={DEV_MODE}, weights={RELIABILITY_WEIGHTS}")
+# Column of the per-kind incident count, and the penalty per incident, for every kind of failure.
+FAILURE_INCIDENT_COLUMNS = {
+    "engine_failure": "engine_failure_incidents",
+    "transmission": "transmission_incidents",
+    "head_gasket": "head_gasket_incidents",
+    OTHER_FAILURE[0]: "other_failure_incidents",
+}
+FAILURE_PENALTIES = {code: penalty for code, _, penalty, _ in FAILURE_TYPES}
+FAILURE_PENALTIES[OTHER_FAILURE[0]] = OTHER_FAILURE[1]
+
+log.info(f"dev_mode={DEV_MODE}, weights={RELIABILITY_WEIGHTS}, failure penalties={FAILURE_PENALTIES}")
 
 # COMMAND ----------
 
@@ -58,7 +71,8 @@ def vehicle_service_summary(service_events_df: DataFrame) -> DataFrame:
     performed_maintenance = (is_type("OIL_CHANGE") | is_type("BIG_SERVICE") | is_type("ENGINE_WORK")) & ~skipped
     trusted_odometer = F.coalesce(F.col("is_odometer_monotonic"), F.lit(False))
     count_if = lambda condition: F.sum(F.when(condition, 1).otherwise(0)).cast("int")  # noqa: E731
-    return service_events_df.groupBy("vehicle_id").agg(
+    kind = failure_type("notes", "is_repair")
+    summary = service_events_df.groupBy("vehicle_id").agg(
         F.count("*").cast("int").alias("service_events"),
         count_if(performed_maintenance).alias("maintenance_events"),
         count_if(is_repair).alias("repair_events"),
@@ -68,8 +82,13 @@ def vehicle_service_summary(service_events_df: DataFrame) -> DataFrame:
         count_if(is_type("ENGINE_WORK")).alias("engine_inspections"),
         count_if(skipped).alias("skipped_services"),
         F.coalesce(F.sum(F.when(trusted_odometer, F.col("oil_gap_penalty"))), F.lit(0.0)).cast("double").alias("oil_gap_penalty_total"),
-    ).withColumn(
-        "repair_incidents", F.ceil(F.col("repair_events") / REPAIR_ROWS_PER_INCIDENT).cast("int")
+        *[count_if(kind == code).alias(f"{code}_rows") for code in FAILURE_INCIDENT_COLUMNS],
+    )
+    # Incidents per kind (a diagnosis row and a fix row of the same kind are one incident) and in total.
+    for code, column in FAILURE_INCIDENT_COLUMNS.items():
+        summary = summary.withColumn(column, F.ceil(F.col(f"{code}_rows") / REPAIR_ROWS_PER_INCIDENT).cast("int"))
+    return summary.withColumn(
+        "repair_incidents", sum(F.col(c) for c in FAILURE_INCIDENT_COLUMNS.values()).cast("int")
     )
 
 
@@ -98,7 +117,8 @@ def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFram
     def penalty(value: Column) -> Column:
         return F.when(has_history, value.cast("double"))
 
-    repair_penalty = penalty(w["repair_incident"] * F.col("repair_incidents") + w["repair_downtime_day"] * F.col("repair_downtime_days"))
+    failure_points = sum(FAILURE_PENALTIES[code] * F.col(column) for code, column in FAILURE_INCIDENT_COLUMNS.items())
+    repair_penalty = penalty(failure_points + w["repair_downtime_day"] * F.col("repair_downtime_days"))
     minor_penalty = penalty(w["minor_repair"] * F.col("minor_repairs") + w["engine_inspection"] * F.col("engine_inspections"))
     skipped_penalty = penalty(F.least(F.lit(w["skipped_service_max"]), w["skipped_service"] * F.col("skipped_services")))
     oil_penalty = penalty(F.least(F.lit(w["oil_gap_max"]), w["oil_gap_point"] * F.col("oil_gap_penalty_total")))
@@ -106,7 +126,7 @@ def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFram
     scored = joined.select(
         "vehicle_key",
         *[F.coalesce(F.col(c), F.lit(0)).cast("int").alias(c) for c in
-          ["service_events", "maintenance_events", "repair_incidents"]],
+          ["service_events", "maintenance_events", "repair_incidents", *FAILURE_INCIDENT_COLUMNS.values()]],
         F.coalesce("repair_cost_eur", F.lit(0)).cast("decimal(12,2)").alias("repair_cost_eur"),
         F.coalesce("repair_downtime_days", F.lit(0.0)).alias("repair_downtime_days"),
         *[F.coalesce(F.col(c), F.lit(0)).cast("int").alias(c) for c in ["minor_repairs", "skipped_services"]],
@@ -162,9 +182,17 @@ silver_cost = service_events_df.filter(F.coalesce(F.col("is_repair"), F.lit(Fals
 summary_cost = summary_df.agg(F.sum("repair_cost_eur")).first()[0] or 0
 assert summary_cost == silver_cost, f"{TABLE_NAME}: repair cost {summary_cost} != Silver {silver_cost}"
 
-odd_repairs = summary_df.filter(F.col("repair_events") % REPAIR_ROWS_PER_INCIDENT != 0).count()
+odd_repairs = summary_df.filter(
+    reduce(lambda a, b: a | b, [F.col(f"{code}_rows") % REPAIR_ROWS_PER_INCIDENT != 0 for code in FAILURE_INCIDENT_COLUMNS])
+).count()
 if odd_repairs:
-    log.warning(f"{odd_repairs} vehicles have an odd number of repair rows (a diagnosis without its fix, or the reverse)")
+    log.warning(f"{odd_repairs} vehicles have an odd number of repair rows of one kind (a diagnosis without its fix)")
+other_failures = summary_df.agg(F.sum(f"{OTHER_FAILURE[0]}_rows")).first()[0] or 0
+if other_failures:
+    log.warning(f"{other_failures} repair rows match no known kind of failure (penalty {OTHER_FAILURE[1]}): check the notes")
+repair_rows = summary_df.agg(F.sum("repair_events")).first()[0] or 0
+kind_rows = summary_df.agg(sum(F.sum(f"{code}_rows") for code in FAILURE_INCIDENT_COLUMNS)).first()[0] or 0
+assert kind_rows == repair_rows, f"{TABLE_NAME}: {kind_rows} repair rows by kind, {repair_rows} repair rows in total"
 unmatched = summary_df.join(reliability.select("vehicle_key"),
                             surrogate_key("vehicle_id") == F.col("vehicle_key"), "left_anti").count()
 if unmatched:
@@ -200,6 +228,22 @@ display(
         F.max("reliability_score").alias("max_score"),
     )
     .orderBy("repair_incidents")
+)
+
+# COMMAND ----------
+
+# Vehicles with one failure: the kind of failure decides how much the score drops.
+display(
+    reliability.filter(F.col("repair_incidents") == 1)
+    .withColumn("failure", F.coalesce(*[F.when(F.col(c) == 1, F.lit(code)) for code, c in FAILURE_INCIDENT_COLUMNS.items()]))
+    .groupBy("failure")
+    .agg(
+        F.count("*").alias("vehicles"),
+        F.min("reliability_score").alias("min_score"),
+        F.round(F.avg("reliability_score"), 1).alias("avg_score"),
+        F.max("reliability_score").alias("max_score"),
+    )
+    .orderBy("avg_score")
 )
 
 # COMMAND ----------

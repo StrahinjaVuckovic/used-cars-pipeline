@@ -40,7 +40,8 @@ log.info(f"dev_mode={DEV_MODE}")
 def build_fact_service_event(service_events_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFrame:
     # ~430k keys (a few MB): broadcast, so the 8.3M events are not shuffled.
     known_vehicles = F.broadcast(dim_vehicle_df.select(F.col("vehicle_key").alias("_known_vehicle_key")))
-    events = service_events_df.withColumn("_vehicle_key", surrogate_key("vehicle_id"))
+    # failure_type (from the repair notes) is part of the service type key, as in dim_service_type.
+    events = with_failure_type(service_events_df).withColumn("_vehicle_key", surrogate_key("vehicle_id"))
     return (
         events.join(known_vehicles, F.col("_vehicle_key") == F.col("_known_vehicle_key"), "left")
         .select(

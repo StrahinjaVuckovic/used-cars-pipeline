@@ -29,10 +29,23 @@ DIM_DATE_END = "2030-12-31"
 
 # Natural keys shared by a dimension and the facts that reference it.
 LOCATION_KEY_COLUMNS = ["state", "region"]
+# failure_type is derived from the repair notes (with_failure_type), not a Silver column.
 SERVICE_TYPE_KEY_COLUMNS = [
     "service_type", "event_type", "maintenance_kind", "severity",
-    "is_maintenance", "is_repair", "is_inspection", "is_oil_change",
+    "is_maintenance", "is_repair", "is_inspection", "is_oil_change", "failure_type",
 ]
+
+# Kinds of failure, recognized from the notes of a REPAIR row (lower case), checked in this order. Both rows of an
+# incident (diagnosis and fix) carry the same kind. "engine overheat" must match head_gasket before any engine
+# pattern. Penalty = points per incident in the Reliability Score (documentation/reliability_score.md).
+FAILURE_TYPES = [
+    # (code, notes pattern, penalty per incident, display name)
+    ("transmission", r"transmission", 30.0, "Transmission"),
+    ("head_gasket", r"head gasket|overheat", 20.0, "Head Gasket"),
+    ("engine_failure", r"engine fail|engine replace", 35.0, "Engine Failure"),
+]
+OTHER_FAILURE = ("other", 25.0, "Other")  # a repair whose notes match no known kind
+NO_FAILURE_LABEL = "No Failure"
 
 # Currencies of the listings and their display names (dim_currency is built from this list).
 CURRENCY_NAMES = {"EUR": "Euro", "USD": "US Dollar", "GBP": "British Pound", "AUD": "Australian Dollar"}
@@ -75,7 +88,9 @@ GOLD_COLUMNS = {
     ],
     "fact_exchange_rate": ["rate_date_key", "currency_key", "rate_per_eur"],
     "fact_vehicle_reliability": [
-        "vehicle_key", "service_events", "maintenance_events", "repair_incidents", "repair_cost_eur",
+        "vehicle_key", "service_events", "maintenance_events", "repair_incidents",
+        "engine_failure_incidents", "transmission_incidents", "head_gasket_incidents", "other_failure_incidents",
+        "repair_cost_eur",
         "repair_downtime_days", "minor_repairs", "skipped_services", "oil_gap_penalty_total",
         "repair_penalty", "minor_repair_penalty", "skipped_service_penalty", "oil_change_penalty",
         "reliability_score", "reliability_category", "score_confidence",
@@ -84,7 +99,7 @@ GOLD_COLUMNS = {
 
 # Reliability Score (documentation/reliability_score.md): 100 minus explainable penalties, clamped to 0-100.
 RELIABILITY_WEIGHTS = {
-    "repair_incident": 25.0,          # per repair incident (diagnosis + fix rows = one incident)
+    # per repair incident: by kind of failure, see FAILURE_TYPES / OTHER_FAILURE
     "repair_downtime_day": 0.5,       # per day the vehicle was out of service because of repairs
     "minor_repair": 5.0,              # per BODY_WORK event ("minor exterior repair")
     "engine_inspection": 0.0,         # per ENGINE_WORK event ("major engine inspection"): an inspection, neutral
@@ -100,6 +115,34 @@ RELIABILITY_CATEGORIES = [(90.0, "Excellent"), (75.0, "Good"), (50.0, "Fair"), (
 SCORE_CONFIDENCE_EVENTS = [(15, "High"), (5, "Medium"), (1, "Low")]
 
 # COMMAND ----------
+
+
+def failure_type(notes, is_repair) -> Column:
+    """
+    Kind of failure of a service event: engine_failure / transmission / head_gasket / other for a repair,
+    null for every event that is not a repair. Only repair rows (~1% of the events) are matched against the text.
+    """
+    notes = F.col(notes) if isinstance(notes, str) else notes
+    is_repair = F.col(is_repair) if isinstance(is_repair, str) else is_repair
+    text = F.lower(F.coalesce(notes, F.lit("")))
+    kind = F.when(~F.coalesce(is_repair, F.lit(False)), F.lit(None).cast("string"))
+    for code, pattern, _, _ in FAILURE_TYPES:
+        kind = kind.when(text.rlike(pattern), F.lit(code))
+    return kind.otherwise(F.lit(OTHER_FAILURE[0]))
+
+
+def with_failure_type(service_events_df: DataFrame) -> DataFrame:
+    """Silver service events with the derived failure_type column (part of the service type key)."""
+    return service_events_df.withColumn("failure_type", failure_type("notes", "is_repair"))
+
+
+def failure_type_display_name(column) -> Column:
+    """Display name of a failure_type code; "No Failure" for events that are not repairs."""
+    column = F.col(column) if isinstance(column, str) else column
+    display_names = {code: name for code, _, _, name in FAILURE_TYPES}
+    display_names[OTHER_FAILURE[0]] = OTHER_FAILURE[2]
+    names = F.create_map(*[F.lit(v) for pair in display_names.items() for v in pair])
+    return F.coalesce(names[column], F.lit(NO_FAILURE_LABEL))
 
 
 def gold_path(table_name: str, dev_mode: bool) -> str:

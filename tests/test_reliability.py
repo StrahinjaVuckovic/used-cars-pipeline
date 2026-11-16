@@ -16,8 +16,12 @@ from test_gold import gold_namespace
 NOTEBOOK = "09_gold_fact_vehicle_reliability.py"
 EVENT_SCHEMA = (
     "vehicle_id STRING, service_type STRING, is_repair BOOLEAN, cost_eur DECIMAL(10,2), downtime_days DOUBLE, "
-    "is_skipped_service BOOLEAN, oil_gap_penalty DOUBLE, is_odometer_monotonic BOOLEAN"
+    "is_skipped_service BOOLEAN, oil_gap_penalty DOUBLE, is_odometer_monotonic BOOLEAN, notes STRING"
 )
+# The real notes of the three kinds of failure: (diagnosis, fix).
+ENGINE_FAILURE = ("engine failure; engine replace recommended", "engine replaced; timing belt and coolant renewed")
+TRANSMISSION = ("transmission failure; gearbox slipping", "transmission replaced; atf filled and adaptation performed")
+HEAD_GASKET = ("engine overheat; head gasket suspected; vehicle towed", "head gasket replaced; coolant system flushed")
 
 
 @pytest.fixture(scope="module")
@@ -40,19 +44,25 @@ def score(spark, tmp_path_factory):
 
 
 def oil(penalty=0.0, monotonic=True):
-    return ("OIL_CHANGE", False, None, None, False, penalty, monotonic)
+    return ("OIL_CHANGE", False, None, None, False, penalty, monotonic, None)
 
 
 def big_service(skipped=False):
-    return ("BIG_SERVICE", False, None, None, skipped, 0.0, True)
+    return ("BIG_SERVICE", False, None, None, skipped, 0.0, True, "Skipped" if skipped else None)
 
 
-def repair(cost="1500.00", downtime=7.5):
-    return ("REPAIR", True, Decimal(cost), downtime, False, 0.0, True)
+def repair(cost="1500.00", downtime=7.5, notes=None):
+    """A repair row; without notes its kind is "other" (penalty 25 per incident)."""
+    return ("REPAIR", True, Decimal(cost), downtime, False, 0.0, True, notes)
 
 
-BODY_WORK = ("BODY_WORK", False, None, None, False, 0.0, True)
-ENGINE_WORK = ("ENGINE_WORK", False, None, None, False, 0.0, True)
+def failure(kind, downtime=0.0):
+    """One incident of a known kind: its diagnosis row and its fix row."""
+    return [repair(downtime=downtime, notes=kind[0]), repair(downtime=downtime, notes=kind[1])]
+
+
+BODY_WORK = ("BODY_WORK", False, None, None, False, 0.0, True, "Minor exterior repair")
+ENGINE_WORK = ("ENGINE_WORK", False, None, None, False, 0.0, True, "Major engine inspection")
 
 
 def test_only_regular_maintenance_scores_100(score):
@@ -156,3 +166,40 @@ def test_profiling_notebook_runs_on_the_sample(spark, bronze_sample, tmp_path):
     run_notebook("profiling/04_profile_reliability_inputs.py", namespace)
     assert len(namespace["display"].results) == 6  # every report cell ran
     assert sorted(p.name for p in silver.iterdir()) == ["service_events"]
+
+
+# ---------- kind of failure ----------
+
+
+@pytest.mark.parametrize(
+    "kind, column, penalty",
+    [(ENGINE_FAILURE, "engine_failure_incidents", 35.0), (TRANSMISSION, "transmission_incidents", 30.0),
+     (HEAD_GASKET, "head_gasket_incidents", 20.0)],
+)
+def test_penalty_depends_on_the_kind_of_failure(score, kind, column, penalty):
+    row = score({"v": [oil()] * 10 + failure(kind, downtime=5.0)})["v"]
+    assert (row.repair_incidents, row[column]) == (1, 1)
+    assert row.repair_penalty == penalty + 0.5 * 10  # two rows of 5 days
+    assert row.reliability_score == 100 - penalty - 5.0
+
+
+def test_engine_overheat_is_a_head_gasket_failure_not_an_engine_failure(score):
+    row = score({"v": [oil()] * 5 + failure(HEAD_GASKET)})["v"]
+    assert (row.head_gasket_incidents, row.engine_failure_incidents) == (1, 0)
+
+
+def test_unknown_notes_count_as_other_with_the_default_penalty(score):
+    row = score({"v": [oil()] * 5 + [repair(downtime=0.0, notes="brake disc cracked"), repair(downtime=0.0, notes="brakes replaced")]})["v"]
+    assert (row.other_failure_incidents, row.repair_incidents, row.repair_penalty) == (1, 1, 25.0)
+
+
+def test_two_failures_of_the_same_kind(score):
+    row = score({"v": [oil()] * 10 + failure(ENGINE_FAILURE, downtime=8.5) * 2})["v"]
+    assert (row.engine_failure_incidents, row.repair_incidents) == (2, 2)
+    assert row.reliability_score == 100 - 70 - 17  # 13.0
+
+
+def test_failure_kind_ranks_the_score(score):
+    rows = score({kind: [oil()] * 10 + failure(notes) for kind, notes in
+                  [("engine", ENGINE_FAILURE), ("transmission", TRANSMISSION), ("gasket", HEAD_GASKET)]})
+    assert rows["engine"].reliability_score < rows["transmission"].reliability_score < rows["gasket"].reliability_score

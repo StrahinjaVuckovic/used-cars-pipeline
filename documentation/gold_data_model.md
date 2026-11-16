@@ -96,8 +96,11 @@ without both values points to `-1`. Missing parts are shown as `Unknown`.
 ### `gold.dim_service_type`
 **Grain:** each distinct combination of the service classification columns of `silver.service_events`
 (`service_type`, `event_type`, `maintenance_kind`, `severity`, `is_maintenance`, `is_repair`, `is_inspection`,
-`is_oil_change`) – a *junk dimension* of a few dozen rows that keeps eight low-cardinality columns out of the
-8.3M-row fact. **Key:** `xxhash64` of all eight columns. Text values missing in Silver are shown as `Unknown`.
+`is_oil_change`) plus **`failure_type`**, the kind of failure recognized from the repair notes (Engine Failure /
+Transmission / Head Gasket / Other; No Failure for every other event; see `reliability_score.md`). A *junk
+dimension* (8 rows with Unknown: REPAIR splits into its three kinds) that keeps nine low-cardinality columns out of
+the 8.3M-row fact. **Key:** `xxhash64` of all nine columns (`failure_type` as its code). Text values missing in
+Silver are shown as `Unknown`.
 
 ## Facts
 
@@ -140,7 +143,8 @@ Checks: Silver rows + one EUR row per day, unique (`rate_date_key`, `currency_ke
 | Column | Rule |
 |---|---|
 | `service_events`, `maintenance_events` | all events; performed oil changes, big services and engine inspections |
-| `repair_incidents` | failures; a diagnosis row and a fix row are one incident (`ceil(repair rows / 2)`) |
+| `repair_incidents` | failures; a diagnosis row and a fix row of the same kind are one incident |
+| `engine_failure_incidents`, `transmission_incidents`, `head_gasket_incidents`, `other_failure_incidents` | failures per kind (from the repair notes) |
 | `repair_cost_eur`, `repair_downtime_days` | totals of the repair rows |
 | `minor_repairs`, `skipped_services`, `oil_gap_penalty_total` | BODY_WORK events; skipped big services; late-oil-change points (valid odometer only) |
 | `repair_penalty`, `minor_repair_penalty`, `skipped_service_penalty`, `oil_change_penalty` | points taken off per component (null without service history) |

@@ -132,6 +132,27 @@ Simulated on the full local copy of the service book (version 2, with the kind o
 One failure, by kind: engine failure 24–60 (average 52.9), transmission 32–65 (58.8), head gasket 45–77 (72.3).
 Categories: Excellent 349,594, Good 39,141, Fair 15,506, Poor 15,400, Unknown 8,239 (no history).
 
+### Version 2 verified on the cluster (2026-11-16, Job `gold`)
+
+`dim_service_type` 8 rows (REPAIR split into Head Gasket / Engine Failure / Transmission); no repair row of an
+unknown kind; repair cost total 178,572,463.59 EUR = Silver.
+
+| Repair incidents | Vehicles | Score min / avg / max |
+|---|---|---|
+| 0 | 386,356 | 70 / 96.5 / 100 |
+| 1 | 16,646 | 24 / 61.3 / 77.5 |
+| 2 | 16,639 | 0 / 26.5 / 54.3 |
+
+One failure by kind: engine failure 24–59.9 (average 52.9), transmission 32.2–65.4 (58.8), head gasket 44.7–77.5
+(72.4). Categories: Excellent 349,594, Good 39,201, Fair 15,488, Poor 15,358, Unknown 8,239 (within a few dozen
+vehicles of the simulation: vehicles right at a category bound). The lowest scores are vehicles with two engine
+failures or two transmission failures and poor maintenance. Failures per manufacturer and kind are spread almost
+evenly (e.g. Ford: transmission 2,809, head gasket 2,727, engine 2,705), like the scores per manufacturer.
+
+Runtime: the main cell of `dim_small` is unchanged (~1 min 28 s); `fact_vehicle_reliability` took 2 min 1 s from
+its first to its last log line against 1 min 38 s for version 1 (+23 s: the three new checks plus the variance of
+four fact tasks sharing a 4-core cluster). The whole Job `gold` stays at about 4–5 minutes.
+
 ### Version 1 verified on the cluster (2026-11-16, flat 25 per failure)
 
 427,880 rows; repair cost total 178,572,463.59 EUR = Silver; no vehicle with an odd number of repair rows and no

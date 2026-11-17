@@ -15,6 +15,11 @@ resources:
   jobs:
     silver_dq:
       name: silver_dq
+      # E-mail when the Job fails, i.e. when an error rule failed: the mail links to the run, whose error lists every
+      # failed rule. The real address is set in the Databricks UI; it is not kept in git.
+      email_notifications:
+        on_failure:
+          - <recipient e-mail address>
       tasks:
         - task_key: dq_checks
           notebook_task:

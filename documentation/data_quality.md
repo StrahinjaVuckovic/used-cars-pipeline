@@ -100,6 +100,37 @@ Silver tables have already been rewritten at that point; what is protected is Go
 which keeps its previous correct version. The `assert`s inside the Silver notebooks still stop the worst cases
 before a Silver write.
 
+## Verified on the cluster (2026-11-16, Job `silver_dq`, ID 363052312939361, full data)
+
+Profiles: vehicle_listings 427,880, service_events 8,312,490, brand_lookup 23,756, exchange_rates 5,286 rows.
+**35 rules: 35 passed, 0 warnings, 0 errors** ("Silver is ready for Gold"). The measured values match the values
+the thresholds were derived from: invalid manufacture year 2.51%, invalid latitude/longitude 2.33%, unknown
+manufacturer 2.84%, valid rows 94.32%, service-book vehicles in the listings 100%, latest rate 3 days old, largest
+rate gap 3 days (a weekend). The negative case (an error rule fails → results stored, run fails with the list of
+failed rules) is covered by `tests/test_dq_checks.py`; the run on the cluster with `threshold_overrides` and the ADF
+wiring are pending (see below).
+
+**Pending:** the Databricks account ran out of credits right after this run ("exhausted your available credits"),
+so the cluster cannot start. The `silver_dq` activity is already in `pl_daily_master` (published 2026-11-17, gold
+depends on it), but the master has not run with it yet; that run and the negative run on the cluster wait until the
+credits are restored.
+
+## Alerting
+
+The Job `silver_dq` has a Databricks **e-mail notification on failure** (`email_notifications.on_failure`, set
+2026-11-17; the address is configured in the Databricks UI and not kept in git). An error rule failing makes the
+notebook fail, so the e-mail arrives exactly when Silver is not good enough for Gold. The e-mail names the Job and
+links to the run; the run's error message lists every failed rule with the measured value and the threshold, e.g.
+
+```
+1 data quality error rule(s) failed:
+- service_events.vehicles_in_listings_share = 97.20%, expected >= 99.00%: service-book vehicles must exist in the listings (dim_vehicle)
+```
+
+Warnings do not fail the run and send no e-mail; they are in `silver.dq_results`. Not tested yet (no Databricks
+credits): the test is the negative run with `threshold_overrides`. A daily summary or a Teams message with the
+failed rules in the message itself would read `silver.dq_results` (e.g. from a Logic App) – a possible next step.
+
 ## Adding or changing a rule
 
 Add one `dq_rule(table, rule, severity, description, metric, operator, threshold, unit)` to the `RULES` list in

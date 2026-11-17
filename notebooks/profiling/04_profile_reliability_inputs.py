@@ -20,6 +20,7 @@
 # MAGIC | Late oil changes? | `oil_gap_penalty` > 0 on 9.4% of events, 40% of vehicles; per vehicle p75 4, p95 18, p99 46, max 84,048 (impossible odometer jumps) | 0.5 per point, at most 10; rows with a non-monotonic odometer ignored |
 # MAGIC | Are the components related? | correlation between repairs, body work, skipped services and oil penalty ≈ 0 | each component adds its own information |
 # MAGIC | How long is a vehicle's history? | median 0.97 years and 17 events | no normalization per year or km |
+# MAGIC | Age at posting and mileage (version 3) | age p50 8 / p95 23 years; highest service-book odometer p50 84,000 / p95 201,000 / max 2,000,000 km; the share of vehicles with a failure is 7.3–8.7% in every age and mileage band (correlation ≈ 0) | wear penalty as a real-world risk assumption, not shown by this data: 0.2 per year + 0.05 per 1,000 km, at most 10, x1.0–1.5 for neglect |
 
 # COMMAND ----------
 
@@ -102,6 +103,32 @@ display(
         [(c, per_vehicle.stat.corr("repair_rows", c)) for c in ["body_work", "engine_work", "skipped", "events"]],
         "component STRING, corr_with_repairs DOUBLE",
     )
+)
+
+# COMMAND ----------
+
+# Version 3: do age at posting and mileage go with failures? (failure rate per age band and mileage band)
+ages = spark.read.format("delta").load(f"{SILVER_PATH}/vehicle_listings{'_dev' if DEV_MODE else ''}").select(
+    "vehicle_id", (F.year("posting_date") - F.col("manufacture_year")).alias("age_years")
+) if delta_table_exists(f"{SILVER_PATH}/vehicle_listings{'_dev' if DEV_MODE else ''}") else None
+km = events.filter(F.col("is_odometer_monotonic")).groupBy("vehicle_id").agg(F.max("odometer_km").alias("max_odometer_km"))
+wear = per_vehicle.join(km, "vehicle_id", "left")
+if ages is not None:
+    wear = wear.join(ages, "vehicle_id", "left")
+    display(
+        wear.groupBy(F.when(F.col("age_years") <= 5, "0-5").when(F.col("age_years") <= 10, "6-10")
+                     .when(F.col("age_years") <= 20, "11-20").otherwise("21+ / unknown").alias("age_band"))
+        .agg(F.count("*").alias("vehicles"), F.round(F.avg((F.col("repair_rows") > 0).cast("int")), 4).alias("failure_rate"))
+        .orderBy("age_band")
+    )
+
+# COMMAND ----------
+
+display(
+    wear.groupBy(F.when(F.col("max_odometer_km") < 50000, "<50k").when(F.col("max_odometer_km") < 100000, "50-100k")
+                 .when(F.col("max_odometer_km") < 200000, "100-200k").otherwise("200k+ / unknown").alias("km_band"))
+    .agg(F.count("*").alias("vehicles"), F.round(F.avg((F.col("repair_rows") > 0).cast("int")), 4).alias("failure_rate"))
+    .orderBy("km_band")
 )
 
 # COMMAND ----------

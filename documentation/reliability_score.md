@@ -59,6 +59,8 @@ reliability_score = clamp(0, 100,
     − minor_repair_penalty     = 5 × BODY_WORK events + 0 × ENGINE_WORK events
     − skipped_service_penalty  = min(15, 5 × skipped big services)
     − oil_change_penalty       = min(10, 0.5 × oil_gap_penalty)          rows with a valid odometer only
+    − wear_penalty             = min(10, 0.2 × age years + 0.05 × km / 1,000)
+                                 × (1 + 0.5 × (skipped_service_penalty + oil_change_penalty) / 25)     (version 3)
 )
 ```
 
@@ -87,6 +89,23 @@ Before the kind was used (version 1, verified 2026-11-16), every failure cost 25
 them: an engine failure took about 4 points more than a head gasket. Now the order follows the data (cost and
 downtime), and the steps are rounded so they can be read and explained; the average penalty (~28) stays close to 25.
 
+### Wear: age and mileage (version 3, mentor's request 2026-11-16)
+
+The mentor asked for the manufacture year and the mileage in the score; the user proposed 1 point per 5 years and
+1 point per 20,000 km, raised by a multiplier when services and oil changes were skipped. Implemented as:
+
+| Part | Rule | Why |
+|---|---|---|
+| Age | 0.2 points per year (= 1 per 5 years), age = posting year − manufacture year, at least 0 | at the posting date, not today, so the same data always gives the same score; linear instead of steps, so a car does not lose a whole point the day it turns 10 |
+| Mileage | 0.05 points per 1,000 km (= 1 per 20,000 km), highest service-book odometer with a valid, increasing odometer | the service book is in km; the listings' odometer has an unknown unit |
+| Cap | age + mileage at most 10 | without it 2,000,000 km (a data error) would take 100 points; ~20% of the vehicles reach the cap, mostly by mileage (p95 201,000 km) |
+| Neglect multiplier | 1 + 0.5 × (skipped + oil penalties) / 25, so 1.0 for careful owners up to 1.5 for the most neglected | wear is worse when maintenance was neglected; grows gradually instead of jumping at "3 skipped services"; it adds to behaviour that is already penalized, on purpose |
+| Unknown age or mileage | 0 points | no evidence, no penalty |
+
+**Honest note:** in this data neither the age nor the mileage goes with failures – the share of vehicles with a
+failure is 7.3–8.7% in every age and mileage band, correlation ≈ 0 (like the manufacturer). The wear penalty is
+therefore a real-world risk assumption (an older, more driven car is riskier), not a pattern found in this data.
+
 ### Weights
 
 | Weight | Value | Why |
@@ -97,12 +116,15 @@ downtime), and the steps are rounded so they can be read and explained; the aver
 | Engine inspection | 0 | An inspection, not a failure (evidence above). |
 | Skipped big service | 5, max 15 | Poor maintenance discipline lowers the score, but never as much as a heavy failure. |
 | Late oil change | 0.5 per point, max 10 | Uses the source's own lateness measure; the cap keeps impossible odometer jumps from destroying a score; rows with a non-monotonic odometer are ignored. |
+| Wear (age + mileage) | 0.2 per year + 0.05 per 1,000 km, max 10, × 1.0–1.5 (max 15) | Mentor's request; capped so that a failure stays the strongest factor (see above). |
 
 The maintenance penalties are capped (15 + 10), so poor maintenance alone costs at most 25 points plus 5 per body
 repair. One head gasket failure (20 + ~4 for downtime) costs about as much, so **a vehicle with one repaired head
 gasket and good maintenance (~77, Good) can rank above a vehicle without failures but with very poor maintenance
 (70)**. This is intended: a repaired head gasket is a smaller problem than neglected maintenance at its worst.
-Engine and transmission failures always rank below every vehicle without failures.
+With the wear penalty (version 3) a vehicle without failures can lose up to 25 + 5 + 15 = 45 points (old, heavily
+driven and neglected), so the groups overlap more: on the simulation, no failure 55–100, one failure 9–76. This is
+the intended effect of the mentor's request: wear and neglect now matter next to failures.
 
 **Categories:** Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor < 50. **Confidence** by the number of service events:
 High ≥ 15, Medium ≥ 5, Low below. **Vehicles without service history** get no score (null), category and
@@ -118,10 +140,25 @@ confidence "Unknown" – no evidence is not the same as perfect reliability.
 | D | one transmission failure (diagnosis 7.0 + fix 8.5 days) | 30 + 7.75 | **62.3** (Fair) |
 | E | engine failed twice (34 days in total), one body repair | 70 + 17 + 5 | **8** (Poor) |
 | F | no service events | – | **null** (Unknown) |
+| G | 12 years old, 150,000 km, one big service skipped, no failure | 5 + (2.4 + 7.5) × 1.1 | **84.1** (Good) |
+
+Examples A–E assume a new vehicle with no mileage (no wear penalty).
 
 ## 3. Distribution
 
-Simulated on the full local copy of the service book (version 2, with the kind of failure):
+**Version 3 (with wear)**, simulated on the vehicles of the fourth source (104,869 with service history):
+
+| Repair incidents | Version 2 (min / avg / max) | Version 3 |
+|---|---|---|
+| 0 | 70 / 96.5 / 100 | **55 / 90.1 / 100** |
+| 1 | 24 / 61.4 / 77.4 | **9 / 54.9 / 76.2** |
+| 2 | 0 / 26.3 / 53.8 | **0 / 20.5 / 52.8** |
+
+Categories: Excellent 83.3% → 55.3%, Good 9.4% → 30.8%, Fair 3.6% → 8.9%, Poor 3.7% → 5.1%. Vehicles without
+failures are now told apart (new and maintained versus old, heavily driven and neglected). Version 3 is not yet
+verified on the cluster (no Databricks credits since 2026-11-16).
+
+Version 2, simulated on the full local copy of the service book (with the kind of failure):
 
 | Repair incidents | Vehicles | Score min / avg / max |
 |---|---|---|

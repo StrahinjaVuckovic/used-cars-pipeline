@@ -4,7 +4,10 @@ Tests for the Reliability Score (notebooks/09_gold_fact_vehicle_reliability.py) 
 The score is 100 minus explainable penalties (documentation/reliability_score.md):
 25 per repair incident + 0.5 per repair downtime day, 5 per BODY_WORK, 5 per skipped big service (max 15),
 0.5 per oil-gap penalty point (max 10, valid odometer only); ENGINE_WORK (an inspection) is neutral.
+Version 3 adds wear: 0.2 per year of age at posting + 0.05 per 1,000 km, at most 10, times 1.0-1.5 for neglect.
 """
+
+import datetime
 
 from decimal import Decimal
 
@@ -16,7 +19,7 @@ from test_gold import gold_namespace
 NOTEBOOK = "09_gold_fact_vehicle_reliability.py"
 EVENT_SCHEMA = (
     "vehicle_id STRING, service_type STRING, is_repair BOOLEAN, cost_eur DECIMAL(10,2), downtime_days DOUBLE, "
-    "is_skipped_service BOOLEAN, oil_gap_penalty DOUBLE, is_odometer_monotonic BOOLEAN, notes STRING"
+    "is_skipped_service BOOLEAN, oil_gap_penalty DOUBLE, is_odometer_monotonic BOOLEAN, notes STRING, odometer_km INT"
 )
 # The real notes of the three kinds of failure: (diagnosis, fix).
 ENGINE_FAILURE = ("engine failure; engine replace recommended", "engine replaced; timing belt and coolant renewed")
@@ -30,30 +33,37 @@ def score(spark, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("reliability")
     namespace = run_notebook_cells_until(NOTEBOOK, gold_namespace(spark, tmp, tmp, tmp), "service_events_df = read_required_table")
 
-    def run(vehicles: dict) -> dict:
+    def run(vehicles: dict, listings: dict = None) -> dict:
+        """`listings`: {vehicle_id: (manufacture_year, posting_date)} for the age; omitted = no listing data."""
         rows = [(vid, *event) for vid, events in vehicles.items() for event in events]
         events_df = spark.createDataFrame(rows, EVENT_SCHEMA)
         key = namespace["surrogate_key"]
         dim = spark.createDataFrame([(vid,) for vid in vehicles], "vehicle_id STRING").select(
             key("vehicle_id").alias("vehicle_key"), "vehicle_id")
         dim = namespace["with_unknown_member"](dim, "vehicle_key")
-        result = namespace["score_vehicles"](namespace["vehicle_service_summary"](events_df), dim)
+        listings_df = None
+        if listings is not None:
+            listings_df = spark.createDataFrame(
+                [(vid, year, posted) for vid, (year, posted) in listings.items()],
+                "vehicle_id STRING, manufacture_year INT, posting_date DATE",
+            )
+        result = namespace["score_vehicles"](namespace["vehicle_service_summary"](events_df), dim, listings_df)
         return {r.vehicle_id: r for r in result.join(dim, "vehicle_key").collect()}
 
     return run
 
 
-def oil(penalty=0.0, monotonic=True):
-    return ("OIL_CHANGE", False, None, None, False, penalty, monotonic, None)
+def oil(penalty=0.0, monotonic=True, km=None):
+    return ("OIL_CHANGE", False, None, None, False, penalty, monotonic, None, km)
 
 
 def big_service(skipped=False):
-    return ("BIG_SERVICE", False, None, None, skipped, 0.0, True, "Skipped" if skipped else None)
+    return ("BIG_SERVICE", False, None, None, skipped, 0.0, True, "Skipped" if skipped else None, None)
 
 
 def repair(cost="1500.00", downtime=7.5, notes=None):
     """A repair row; without notes its kind is "other" (penalty 25 per incident)."""
-    return ("REPAIR", True, Decimal(cost), downtime, False, 0.0, True, notes)
+    return ("REPAIR", True, Decimal(cost), downtime, False, 0.0, True, notes, None)
 
 
 def failure(kind, downtime=0.0):
@@ -61,8 +71,8 @@ def failure(kind, downtime=0.0):
     return [repair(downtime=downtime, notes=kind[0]), repair(downtime=downtime, notes=kind[1])]
 
 
-BODY_WORK = ("BODY_WORK", False, None, None, False, 0.0, True, "Minor exterior repair")
-ENGINE_WORK = ("ENGINE_WORK", False, None, None, False, 0.0, True, "Major engine inspection")
+BODY_WORK = ("BODY_WORK", False, None, None, False, 0.0, True, "Minor exterior repair", None)
+ENGINE_WORK = ("ENGINE_WORK", False, None, None, False, 0.0, True, "Major engine inspection", None)
 
 
 def test_only_regular_maintenance_scores_100(score):
@@ -164,7 +174,7 @@ def test_profiling_notebook_runs_on_the_sample(spark, bronze_sample, tmp_path):
     namespace = load_config_and_utils(spark, bronze_path=str(bronze_sample), silver_path=str(silver),
                                       widget_values={"dev_mode": "false"})
     run_notebook("profiling/04_profile_reliability_inputs.py", namespace)
-    assert len(namespace["display"].results) == 6  # every report cell ran
+    assert len(namespace["display"].results) == 7  # every report cell ran (no listings here: the age table is skipped)
     assert sorted(p.name for p in silver.iterdir()) == ["service_events"]
 
 
@@ -203,3 +213,59 @@ def test_failure_kind_ranks_the_score(score):
     rows = score({kind: [oil()] * 10 + failure(notes) for kind, notes in
                   [("engine", ENGINE_FAILURE), ("transmission", TRANSMISSION), ("gasket", HEAD_GASKET)]})
     assert rows["engine"].reliability_score < rows["transmission"].reliability_score < rows["gasket"].reliability_score
+
+
+# ---------- wear: age and mileage (version 3) ----------
+
+POSTED = datetime.date(2022, 6, 1)
+
+
+def test_age_points_are_taken_at_the_posting_date(score):
+    rows = score({"v10": [oil()] * 5, "v0": [oil()] * 5, "future": [oil()] * 5, "unknown": [oil()] * 5},
+                 listings={"v10": (2012, POSTED), "v0": (2022, POSTED), "future": (2023, POSTED), "unknown": (None, POSTED)})
+    assert (rows["v10"].vehicle_age_years, rows["v10"].age_points, rows["v10"].reliability_score) == (10, 2.0, 98.0)
+    assert (rows["v0"].vehicle_age_years, rows["v0"].age_points) == (0, 0.0)
+    assert (rows["future"].vehicle_age_years, rows["future"].age_points) == (0, 0.0)  # next year's model
+    assert (rows["unknown"].vehicle_age_years, rows["unknown"].age_points, rows["unknown"].reliability_score) == (None, 0.0, 100.0)
+
+
+def test_mileage_points_use_the_highest_valid_service_odometer(score):
+    rows = score({
+        "km": [oil(km=50_000), oil(km=150_000)],                      # 150,000 km -> 7.5
+        "bad_odometer": [oil(km=40_000), oil(km=900_000, monotonic=False)],  # the jump is ignored -> 40,000 km -> 2
+        "no_km": [oil()] * 3,
+    })
+    assert (rows["km"].max_odometer_km, rows["km"].mileage_points, rows["km"].reliability_score) == (150_000, 7.5, 92.5)
+    assert (rows["bad_odometer"].max_odometer_km, rows["bad_odometer"].mileage_points) == (40_000, 2.0)
+    assert (rows["no_km"].max_odometer_km, rows["no_km"].mileage_points) == (None, 0.0)
+
+
+def test_wear_is_capped_at_10(score):
+    row = score({"old": [oil(km=400_000)] * 3}, listings={"old": (1980, POSTED)})["old"]
+    assert (row.age_points, row.mileage_points) == (8.4, 20.0)
+    assert (row.wear_multiplier, row.wear_penalty, row.reliability_score) == (1.0, 10.0, 90.0)
+
+
+def test_neglect_raises_the_wear_penalty_up_to_one_and_a_half(score):
+    rows = score({
+        "careful": [oil(km=100_000)] * 3,                                              # wear 5, x1.0
+        "one_skip": [oil(km=100_000)] * 3 + [big_service(skipped=True)],                # x(1 + 0.5 x 5/25) = 1.1
+        "neglected": [oil(penalty=40.0, km=100_000)] + [big_service(skipped=True)] * 4,  # x1.5
+    })
+    assert (rows["careful"].wear_multiplier, rows["careful"].wear_penalty) == (1.0, 5.0)
+    assert (rows["one_skip"].wear_multiplier, rows["one_skip"].wear_penalty) == (1.1, 5.5)
+    assert (rows["one_skip"].reliability_score) == 100 - 5 - 5.5
+    assert (rows["neglected"].wear_multiplier, rows["neglected"].wear_penalty) == (1.5, 7.5)
+    assert rows["neglected"].reliability_score == 100 - 15 - 10 - 7.5
+
+
+def test_worked_example_from_the_documentation(score):
+    """12 years, 150,000 km, one skipped service, no failure: 100 - 5 - 9.9 x 1.1 = 84.1."""
+    row = score({"v": [oil(km=150_000)] * 10 + [big_service(skipped=True)]}, listings={"v": (2010, POSTED)})["v"]
+    assert (row.age_points, row.mileage_points, row.wear_penalty, row.reliability_score) == (2.4, 7.5, 10.89, 84.1)
+
+
+def test_vehicle_without_history_still_has_no_score_with_age(score):
+    rows = score({"serviced": [oil()] * 3, "no_history": []}, listings={"serviced": (2010, POSTED), "no_history": (2000, POSTED)})
+    row = rows["no_history"]
+    assert (row.reliability_score, row.wear_penalty, row.vehicle_age_years) == (None, None, 22)

@@ -138,7 +138,7 @@ Checks: Silver rows + one EUR row per day, unique (`rate_date_key`, `currency_ke
 
 ### `gold.fact_vehicle_reliability`
 **Grain:** one vehicle of `dim_vehicle` (Unknown excluded). **Key:** `vehicle_key`. Input: `silver.service_events`
-(it has the skipped-service note and the odometer flag) and `dim_vehicle` for the keys.
+(it has the skipped-service note and the odometer flag), `silver.vehicle_listings` (age) and `dim_vehicle` for the keys.
 
 | Column | Rule |
 |---|---|
@@ -147,7 +147,8 @@ Checks: Silver rows + one EUR row per day, unique (`rate_date_key`, `currency_ke
 | `engine_failure_incidents`, `transmission_incidents`, `head_gasket_incidents`, `other_failure_incidents` | failures per kind (from the repair notes) |
 | `repair_cost_eur`, `repair_downtime_days` | totals of the repair rows |
 | `minor_repairs`, `skipped_services`, `oil_gap_penalty_total` | BODY_WORK events; skipped big services; late-oil-change points (valid odometer only) |
-| `repair_penalty`, `minor_repair_penalty`, `skipped_service_penalty`, `oil_change_penalty` | points taken off per component (null without service history) |
+| `vehicle_age_years`, `max_odometer_km` | age at the posting date (from `silver.vehicle_listings`); highest valid service-book odometer |
+| `repair_penalty`, `minor_repair_penalty`, `skipped_service_penalty`, `oil_change_penalty`, `age_points`, `mileage_points`, `wear_multiplier`, `wear_penalty` | points taken off per component and the wear parts (null without service history) |
 | `reliability_score` | 0–100 = 100 minus the penalties, one decimal; null without service history |
 | `reliability_category` | Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor, Unknown |
 | `score_confidence` | High ≥ 15 events, Medium ≥ 5, Low, Unknown |

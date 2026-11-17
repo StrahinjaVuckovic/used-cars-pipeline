@@ -92,7 +92,9 @@ GOLD_COLUMNS = {
         "engine_failure_incidents", "transmission_incidents", "head_gasket_incidents", "other_failure_incidents",
         "repair_cost_eur",
         "repair_downtime_days", "minor_repairs", "skipped_services", "oil_gap_penalty_total",
+        "vehicle_age_years", "max_odometer_km",
         "repair_penalty", "minor_repair_penalty", "skipped_service_penalty", "oil_change_penalty",
+        "age_points", "mileage_points", "wear_multiplier", "wear_penalty",
         "reliability_score", "reliability_category", "score_confidence",
     ],
 }
@@ -107,6 +109,12 @@ RELIABILITY_WEIGHTS = {
     "skipped_service_max": 15.0,      # ... at most
     "oil_gap_point": 0.5,             # per point of the source's oil_gap_penalty (late oil change) ...
     "oil_gap_max": 10.0,              # ... at most
+    # Wear (version 3): age at posting and service-book mileage, together at most wear_max points, raised by up to
+    # wear_multiplier_max when maintenance was neglected (skipped services, late oil changes).
+    "age_point_per_year": 0.2,        # 1 point per 5 years of age at the posting date
+    "mileage_point_per_1000_km": 0.05,  # 1 point per 20,000 km (highest valid service-book odometer)
+    "wear_max": 10.0,
+    "wear_multiplier_max": 1.5,
 }
 REPAIR_ROWS_PER_INCIDENT = 2  # the service book records each failure as a diagnosis row and a fix row
 # Lower bound of each category (score >= bound); vehicles without service history are "Unknown".

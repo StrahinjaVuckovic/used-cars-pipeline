@@ -14,7 +14,9 @@
 # MAGIC        + 0.5 x repair downtime days)
 # MAGIC     - (5 x BODY_WORK + 0 x ENGINE_WORK)                        minor issues (an engine inspection is neutral)
 # MAGIC     - min(15, 5 x skipped big services)                         maintenance discipline
-# MAGIC     - min(10, 0.5 x oil_gap_penalty))                           late oil changes (valid odometer only)
+# MAGIC     - min(10, 0.5 x oil_gap_penalty)                            late oil changes (valid odometer only)
+# MAGIC     - min(10, 0.2 x age years + 0.05 x km / 1000)               wear: age at posting and service-book mileage,
+# MAGIC       x (1 + 0.5 x (skipped + oil penalties) / 25))             raised up to x1.5 when maintenance was neglected
 # MAGIC ```
 # MAGIC
 # MAGIC - Only regular maintenance → 100; frequent repairs → lowest (brief).
@@ -24,7 +26,8 @@
 # MAGIC - `score_confidence` grows with the number of service events (High ≥ 15, Medium ≥ 5, Low).
 # MAGIC
 # MAGIC Input: `silver.service_events` (it has the skipped-service note and the odometer flag that `fact_service_event`
-# MAGIC does not carry) and `gold.dim_vehicle` for the keys.
+# MAGIC does not carry), `silver.vehicle_listings` (manufacture year and posting date for the age) and `gold.dim_vehicle`
+# MAGIC for the keys. The age is taken at the posting date, not today, so the same data always gives the same score.
 # MAGIC
 # MAGIC **Widgets:** `dev_mode` (`true` reads the `_dev` tables and writes `fact_vehicle_reliability_dev`),
 # MAGIC `ingestion_date` (not used).
@@ -82,6 +85,8 @@ def vehicle_service_summary(service_events_df: DataFrame) -> DataFrame:
         count_if(is_type("ENGINE_WORK")).alias("engine_inspections"),
         count_if(skipped).alias("skipped_services"),
         F.coalesce(F.sum(F.when(trusted_odometer, F.col("oil_gap_penalty"))), F.lit(0.0)).cast("double").alias("oil_gap_penalty_total"),
+        # Highest service-book odometer (km) of the rows with a valid, increasing odometer.
+        F.max(F.when(trusted_odometer, F.col("odometer_km"))).alias("max_odometer_km"),
         *[count_if(kind == code).alias(f"{code}_rows") for code in FAILURE_INCIDENT_COLUMNS],
     )
     # Incidents per kind (a diagnosis row and a fix row of the same kind are one incident) and in total.
@@ -106,12 +111,25 @@ def confidence_of(events: Column) -> Column:
     return expr
 
 
-def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFrame:
+def vehicle_ages(listings_df: DataFrame) -> DataFrame:
+    """Age in years at the posting date per vehicle (posting year - manufacture year, at least 0; null if unknown)."""
+    age = F.year("posting_date") - F.col("manufacture_year")
+    return listings_df.select(
+        surrogate_key("vehicle_id").alias("vehicle_key"),
+        F.when(age.isNotNull(), F.greatest(age, F.lit(0))).cast("int").alias("vehicle_age_years"),
+    )
+
+
+def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame, listings_df: DataFrame = None) -> DataFrame:
     """One row per vehicle of dim_vehicle: components, penalties, score, category, confidence."""
     w = RELIABILITY_WEIGHTS
     vehicles = dim_vehicle_df.filter(F.col("vehicle_key") != UNKNOWN_KEY).select("vehicle_key")
     summary = summary_df.withColumn("vehicle_key", surrogate_key("vehicle_id"))
     joined = vehicles.join(summary, "vehicle_key", "left")
+    if listings_df is not None:
+        joined = joined.join(vehicle_ages(listings_df), "vehicle_key", "left")
+    else:
+        joined = joined.withColumn("vehicle_age_years", F.lit(None).cast("int"))
     has_history = F.coalesce(F.col("service_events"), F.lit(0)) > 0
 
     def penalty(value: Column) -> Column:
@@ -122,6 +140,12 @@ def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFram
     minor_penalty = penalty(w["minor_repair"] * F.col("minor_repairs") + w["engine_inspection"] * F.col("engine_inspections"))
     skipped_penalty = penalty(F.least(F.lit(w["skipped_service_max"]), w["skipped_service"] * F.col("skipped_services")))
     oil_penalty = penalty(F.least(F.lit(w["oil_gap_max"]), w["oil_gap_point"] * F.col("oil_gap_penalty_total")))
+    # Wear: age and mileage (unknown = 0), capped together, raised when maintenance was neglected.
+    age_points = penalty(w["age_point_per_year"] * F.coalesce(F.col("vehicle_age_years"), F.lit(0)))
+    mileage_points = penalty(w["mileage_point_per_1000_km"] * F.coalesce(F.col("max_odometer_km"), F.lit(0)) / 1000)
+    neglect_share = (skipped_penalty + oil_penalty) / (w["skipped_service_max"] + w["oil_gap_max"])
+    wear_multiplier = penalty(1 + (w["wear_multiplier_max"] - 1) * neglect_share)
+    wear_penalty = F.least(F.lit(w["wear_max"]), age_points + mileage_points) * wear_multiplier
 
     scored = joined.select(
         "vehicle_key",
@@ -131,13 +155,20 @@ def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFram
         F.coalesce("repair_downtime_days", F.lit(0.0)).alias("repair_downtime_days"),
         *[F.coalesce(F.col(c), F.lit(0)).cast("int").alias(c) for c in ["minor_repairs", "skipped_services"]],
         F.coalesce("oil_gap_penalty_total", F.lit(0.0)).alias("oil_gap_penalty_total"),
+        "vehicle_age_years",
+        F.col("max_odometer_km").cast("int").alias("max_odometer_km"),
         repair_penalty.alias("repair_penalty"),
         minor_penalty.alias("minor_repair_penalty"),
         skipped_penalty.alias("skipped_service_penalty"),
         oil_penalty.alias("oil_change_penalty"),
+        F.round(age_points, 2).alias("age_points"),
+        F.round(mileage_points, 2).alias("mileage_points"),
+        F.round(wear_multiplier, 3).alias("wear_multiplier"),
+        F.round(wear_penalty, 2).alias("wear_penalty"),
     )
     total_penalty = (
-        F.col("repair_penalty") + F.col("minor_repair_penalty") + F.col("skipped_service_penalty") + F.col("oil_change_penalty")
+        F.col("repair_penalty") + F.col("minor_repair_penalty") + F.col("skipped_service_penalty")
+        + F.col("oil_change_penalty") + F.col("wear_penalty")
     )
     # least/greatest skip nulls (least(100, null) = 100), so a vehicle without history must be null explicitly.
     score = F.when(
@@ -156,9 +187,12 @@ def score_vehicles(summary_df: DataFrame, dim_vehicle_df: DataFrame) -> DataFram
 
 service_events_df = read_required_table(silver_path("service_events", DEV_MODE), "04_silver_service_events")
 dim_vehicle_df = read_required_table(gold_path("dim_vehicle", DEV_MODE), "07_gold_dim_vehicle")
+listings_df = read_required_table(silver_path("vehicle_listings", DEV_MODE), "03_silver_vehicle_listings").select(
+    "vehicle_id", "manufacture_year", "posting_date"
+)
 
 summary_df = vehicle_service_summary(service_events_df).cache()
-reliability = score_vehicles(summary_df, dim_vehicle_df).cache()
+reliability = score_vehicles(summary_df, dim_vehicle_df, listings_df).cache()
 
 # COMMAND ----------
 
@@ -244,6 +278,27 @@ display(
         F.max("reliability_score").alias("max_score"),
     )
     .orderBy("avg_score")
+)
+
+# COMMAND ----------
+
+# Wear (version 3): average wear penalty by age band and mileage band, and the share of vehicles at the cap.
+display(
+    reliability.filter(F.col("reliability_score").isNotNull())
+    .withColumn("age_band", F.when(F.col("vehicle_age_years").isNull(), "unknown")
+                .when(F.col("vehicle_age_years") <= 5, "0-5").when(F.col("vehicle_age_years") <= 10, "6-10")
+                .when(F.col("vehicle_age_years") <= 20, "11-20").otherwise("21+"))
+    .withColumn("km_band", F.when(F.col("max_odometer_km").isNull(), "unknown")
+                .when(F.col("max_odometer_km") < 100000, "<100k").when(F.col("max_odometer_km") < 200000, "100-200k")
+                .otherwise("200k+"))
+    .groupBy("age_band", "km_band")
+    .agg(
+        F.count("*").alias("vehicles"),
+        F.round(F.avg("wear_penalty"), 2).alias("avg_wear_penalty"),
+        F.round(F.avg((F.col("age_points") + F.col("mileage_points") >= RELIABILITY_WEIGHTS["wear_max"]).cast("int")), 3).alias("share_at_cap"),
+        F.round(F.avg("reliability_score"), 1).alias("avg_score"),
+    )
+    .orderBy("age_band", "km_band")
 )
 
 # COMMAND ----------

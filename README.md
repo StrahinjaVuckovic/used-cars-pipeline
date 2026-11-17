@@ -56,7 +56,8 @@ Every vehicle starts at 100 and loses explainable points, each stored in its own
 - **failures** (from the repair notes): engine failure 35, transmission 30, head gasket 20 per incident, plus 0.5 per day out of service;
 - **minor body repairs:** 5 each;
 - **skipped big services:** 5 each, at most 15;
-- **late oil changes:** at most 10.
+- **late oil changes:** at most 10;
+- **wear:** 1 point per 5 years of age and per 20,000 km, at most 10, raised up to ×1.5 when maintenance was neglected.
 
 Vehicles with only regular maintenance score 100; vehicles without any service history get no score ("Unknown").
 Categories: Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor. The profiling behind every weight, worked examples and the

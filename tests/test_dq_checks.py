@@ -12,10 +12,9 @@ import json
 import pytest
 from pyspark.sql import functions as F
 
+from conftest import copy_silver
 from notebook_utils import run_notebook
-from test_exchange_rates import run_rates
-from test_service_events import run_service_events_notebook
-from test_vehicle_listings import run_listings_pipeline, vehicle_namespace
+from test_vehicle_listings import vehicle_namespace
 from test_vehicle_listings_priced import run_priced
 
 NOTEBOOK = "06_silver_dq_checks.py"
@@ -79,12 +78,9 @@ def test_threshold_overrides(engine):
 
 
 @pytest.fixture(scope="module")
-def silver(spark, bronze_sample, tmp_path_factory):
-    """Silver tables and the priced temp view from the Bronze sample, like the Silver Jobs."""
-    silver = tmp_path_factory.mktemp("dq") / "silver"
-    run_listings_pipeline(spark, bronze_sample, silver)
-    run_service_events_notebook(spark, bronze_sample, silver)
-    run_rates(spark, bronze_sample, silver)
+def silver(spark, sample_silver, tmp_path_factory):
+    """Silver tables from the Bronze sample (a copy: the notebook appends dq_results) and the priced temp view."""
+    silver = copy_silver(sample_silver, tmp_path_factory.mktemp("dq"))
     run_priced(spark, silver)
     return silver
 

@@ -132,7 +132,9 @@ never loses history. The tables are stored under `gold/cdc/` so the demo never o
   `vehicle_attributes()` in `gold_helpers`. It has no `has_service_history`, because the demo has no service
   book. It adds the SCD2 columns:
   - `vehicle_key`: the **durable** key, the same for all versions and the same as in the main Gold;
-  - `vehicle_version_key`: the version key;
+  - `vehicle_version_key`: the version key, `xxhash64(vehicle_id, lsn_num, change_op)` of the change that started
+    the version. It is not built from `valid_from`: changes inside one transaction share a commit time, so a
+    time-based key would collide, while every change has its own WAL position;
   - `valid_from`, `valid_to`, `is_current`, `is_deleted` (sold), `version_number`.
 
   A new version starts only when a **vehicle attribute** changes, e.g. the condition or the title status.
@@ -140,8 +142,11 @@ never loses history. The tables are stored under `gold/cdc/` so the demo never o
   attributes are merged into one Gold version.
 - **`fact_listing_event`**: one row per change, with `event_type` Snapshot / Listed / Price Change / Updated /
   Sold, plus `price`, `previous_price` and `price_change`. Every event points to the vehicle version that was
-  valid at that moment (**point-in-time join**: `valid_from ≤ event_ts < valid_to`); a Sold event points to the
-  version it closed.
+  valid at that moment. That is the version a point-in-time join (`valid_from ≤ event_ts < valid_to`) would
+  find, but the link is made through the Silver version the event opened (a Sold event: the version it
+  closed), so it stays exact when two changes share a commit time. Analysts join on `vehicle_version_key`
+  for "the vehicle as it was then", on `vehicle_key` + `is_current` for "as it is now", and use
+  `valid_from` / `valid_to` only for an arbitrary moment that is not an event.
 
 Questions this answers, which a full snapshot cannot (examples in the notebook report):
 - the price of every listing at a given moment;
@@ -169,9 +174,9 @@ are in Bronze.
 **Tests:**
 - `tests/test_cdc_simulator.py`: WAL message parsing, TOAST fill, the simulator, the data split.
 - `tests/test_cdc_pipeline.py`: hand-written change files. It covers every SCD2 rule, re-delivery, a partly
-  applied file, a change at the snapshot LSN, the Gold dimension, the point-in-time facts and the diagram.
+  applied file, a change at the snapshot LSN, the Gold dimension (also two changes at the same commit time), the facts and the diagram.
 - The end-to-end test against PostgreSQL is opt-in, because it resets the demo database:
-  `CDC_INTEGRATION=1 .venv/bin/python -m pytest -k end_to_end`.
+  `CDC_INTEGRATION=1 .venv/bin/python -m pytest -m cdc_integration`.
 
 ## Verified run (2026-11-24, `run_demo --days 3 --crash-test`)
 

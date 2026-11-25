@@ -61,9 +61,9 @@ assert current_versions == current_vehicles, (
     f"dim_vehicle: {current_versions} current versions, Silver has {current_vehicles} current listings"
 )
 
-fact_df = build_fact_listing_event(versions_df, dim_df).cache()
+fact_df = build_fact_listing_event(versions_df).cache()
 assert_columns(fact_df, CDC_GOLD_COLUMNS["fact_listing_event"], "fact_listing_event")
-assert_unique(fact_df, ["event_key"], "fact_listing_event")  # also proves the point-in-time join is 1:1
+assert_unique(fact_df, ["event_key"], "fact_listing_event")  # also proves every event got exactly one version
 assert_foreign_key(fact_df, "vehicle_version_key", dim_df, "vehicle_version_key", "fact_listing_event")
 without_version = fact_df.filter(F.col("vehicle_version_key") == UNKNOWN_KEY).count()
 assert without_version == 0, f"fact_listing_event: {without_version} events without a valid vehicle version"

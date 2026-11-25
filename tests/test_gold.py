@@ -14,9 +14,6 @@ from pyspark.sql import functions as F
 
 from conftest import SAMPLE_ROWS
 from notebook_utils import PROJECT_ROOT, load_config_and_utils, run_notebook, run_notebook_cells_until
-from test_exchange_rates import run_rates
-from test_service_events import run_service_events_notebook
-from test_vehicle_listings import run_listings_pipeline
 
 DBML_PATH = PROJECT_ROOT / "documentation" / "gold_star_schema.dbml"
 GOLD_NOTEBOOKS = [  # order of the Gold Job: dimensions, facts, views
@@ -52,13 +49,9 @@ def helpers(spark, tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def full_gold(spark, bronze_sample, tmp_path_factory):
-    """Silver from the Bronze sample, then the whole Gold Job. Returns (gold path, namespaces per notebook)."""
-    root = tmp_path_factory.mktemp("gold_pipeline")
-    silver, gold = root / "silver", root / "gold"
-    run_listings_pipeline(spark, bronze_sample, silver)
-    run_service_events_notebook(spark, bronze_sample, silver)
-    run_rates(spark, bronze_sample, silver)
+def full_gold(spark, bronze_sample, sample_silver, tmp_path_factory):
+    """Silver from the Bronze sample (shared), then the whole Gold Job. Returns (gold path, namespaces per notebook)."""
+    silver, gold = sample_silver, tmp_path_factory.mktemp("gold_pipeline") / "gold"  # Gold only reads Silver
     namespaces = {nb: run_gold(spark, nb, bronze_sample, silver, gold) for nb in GOLD_NOTEBOOKS}
     return gold, silver, namespaces
 

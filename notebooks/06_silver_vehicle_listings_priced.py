@@ -173,8 +173,12 @@ if eur_row is not None:
         .filter((F.col("rate_date") == F.lit(fx_rate_date)) & (F.col("quote_currency") == "GBP"))
         .first().rate
     )
-    expected = round(float(eur_row.price) * gbp_rate, 2)
-    assert abs(float(eur_row.price_gbp) - expected) <= 0.01, f"{VIEW_NAME}: EUR check {eur_row} vs {expected}"
+    # Exact decimal arithmetic with Spark's rounding (half up). Python's float round() can turn x.xx5 into x.xx4
+    # and a float difference of 0.0100000001 would fail the tolerance, so a correct row could stop the run.
+    from decimal import ROUND_HALF_UP, Decimal
+
+    expected = (eur_row.price * Decimal(str(gbp_rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    assert abs(eur_row.price_gbp - expected) <= Decimal("0.01"), f"{VIEW_NAME}: EUR check {eur_row} vs {expected}"
 
 # Normally the rates are a day or two older than the listings; they are newer when the listings were loaded
 # earlier than the latest exchange rate copy.

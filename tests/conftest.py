@@ -40,6 +40,9 @@ def spark(tmp_path_factory):
         # One session serves the whole suite (~290 tests, many cached DataFrames and Delta tables); the default
         # 1 GB heap ran out after ~25 minutes (java.lang.OutOfMemoryError: Java heap space).
         .config("spark.driver.memory", "2g")
+        # Delta rebuilds the state of a table in 50 tasks by default (sized for big clusters); the test tables have a
+        # few rows, so 2 tasks are enough and every Delta read/write is much faster. Local tests only.
+        .config("spark.databricks.delta.snapshotPartitions", "2")
         .config("spark.sql.session.timeZone", "UTC")
         # Databricks Runtime 18 runs with ANSI mode on; keep it explicit so tests behave the same.
         .config("spark.sql.ansi.enabled", "true")
@@ -140,6 +143,33 @@ def bronze_sample(spark, tmp_path_factory) -> Path:
         )
 
     return bronze
+
+
+@pytest.fixture(scope="session")
+def sample_silver(spark, bronze_sample, tmp_path_factory) -> Path:
+    """
+    Silver from the Bronze sample (listings pipeline, service events, exchange rates), built once per test run and
+    shared by the Gold, DQ and priced-view tests. Read only: a test that writes into Silver works on a copy
+    (`copy_silver`).
+    """
+    from test_exchange_rates import run_rates
+    from test_service_events import run_service_events_notebook
+    from test_vehicle_listings import run_listings_pipeline
+
+    silver = tmp_path_factory.mktemp("sample_silver") / "silver"
+    run_listings_pipeline(spark, bronze_sample, silver)
+    run_service_events_notebook(spark, bronze_sample, silver)
+    run_rates(spark, bronze_sample, silver)
+    return silver
+
+
+def copy_silver(source: Path, target_root: Path, without=()) -> Path:
+    """A private copy of a Silver folder (Delta tables copy as plain folders), optionally without some tables."""
+    target = target_root / "silver"
+    shutil.copytree(source, target)
+    for table in without:
+        shutil.rmtree(target / table)
+    return target
 
 
 @pytest.fixture()

@@ -2,10 +2,12 @@
 Tests for the lakehouse side of the CDC demo: notebooks/utils/cdc_helpers.py, 10_silver_listing_changes and
 11_gold_cdc_vehicle_history. The input are small, hand-written change files in the format of cdc/cdc_reader.py,
 so the SCD2 rules can be checked case by case without PostgreSQL. The end-to-end run against the Docker
-database is opt-in (CDC_INTEGRATION=1), because it resets the demo database.
+database is opt-in (CDC_INTEGRATION=1 pytest -m cdc_integration), because it resets the demo database.
 """
 
 import os
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -63,13 +65,17 @@ def release_cached_data(spark):
     spark.catalog.clearCache()
 
 
-@pytest.fixture()
-def lake(spark, tmp_path):
+def make_lake(spark, root) -> dict:
     """Local bronze/silver/gold folders with a tiny brand lookup."""
-    paths = {name: tmp_path / name for name in ("bronze", "silver", "gold")}
+    paths = {name: root / name for name in ("bronze", "silver", "gold")}
     spark.createDataFrame([("f-150", "ford")], "model_normalized STRING, manufacturer STRING") \
         .write.format("delta").save(str(paths["silver"] / "brand_lookup"))
     return paths
+
+
+@pytest.fixture()
+def lake(spark, tmp_path):
+    return make_lake(spark, tmp_path)
 
 
 def land(lake, events, prefix="changes"):
@@ -103,13 +109,21 @@ def ts(minutes):
     return (START + timedelta(minutes=minutes)).astimezone().replace(tzinfo=None)
 
 
-@pytest.fixture()
-def after_day_one(spark, lake):
+@pytest.fixture(scope="module")
+def after_day_one(spark, tmp_path_factory):
+    """Snapshot + day one through Silver and Gold, built once for the module. Tests only read it."""
+    lake = make_lake(spark, tmp_path_factory.mktemp("cdc_day_one"))
     land(lake, SNAPSHOT, "snapshot")
     run_all(spark, lake)
     land(lake, DAY_ONE)
     run_all(spark, lake)
     return lake
+
+
+@pytest.fixture()
+def day_one_copy(after_day_one, tmp_path):
+    """A private copy of the day-one lake for tests that apply more changes."""
+    return {name: Path(shutil.copytree(path, tmp_path / name)) for name, path in after_day_one.items()}
 
 
 # ---------- Silver: SCD2 history ----------
@@ -150,22 +164,22 @@ def test_current_state_is_the_source_state(spark, after_day_one):
     assert current == {IDS["a"]: Decimal("13000.00"), IDS["b"]: Decimal("15000.00"), IDS["d"]: Decimal("9000.00")}
 
 
-def test_redelivered_changes_change_nothing(spark, after_day_one):
+def test_redelivered_changes_change_nothing(spark, day_one_copy):
     """At-least-once: after a crash the reader writes the same changes into a second file."""
-    before = sorted(history(spark, after_day_one).collect())
-    land(after_day_one, DAY_ONE)
-    namespace = run_silver(spark, after_day_one)
+    before = sorted(history(spark, day_one_copy).collect())
+    land(day_one_copy, DAY_ONE)
+    namespace = run_silver(spark, day_one_copy)
     assert namespace["notebook_exit_value"] == "nothing to apply"
-    assert sorted(history(spark, after_day_one).collect()) == before
+    assert sorted(history(spark, day_one_copy).collect()) == before
 
 
-def test_partly_applied_file_applies_only_the_new_changes(spark, after_day_one):
+def test_partly_applied_file_applies_only_the_new_changes(spark, day_one_copy):
     new_change = event("U", 107, 70, before=raw("d", price=9000.0), after=raw("d", price=8500.0))
-    land(after_day_one, DAY_ONE[-2:] + [new_change])
-    run_silver(spark, after_day_one)
-    d = versions_of(spark, after_day_one, "d")
+    land(day_one_copy, DAY_ONE[-2:] + [new_change])
+    run_silver(spark, day_one_copy)
+    d = versions_of(spark, day_one_copy, "d")
     assert [r.price for r in d] == [Decimal("9000.00"), Decimal("8500.00")]
-    assert history(spark, after_day_one).count() == 3 + 2 + 1 + 2  # versions of a, b, c, d
+    assert history(spark, day_one_copy).count() == 3 + 2 + 1 + 2  # versions of a, b, c, d
 
 
 def test_change_at_the_snapshot_position_follows_the_snapshot(spark, lake):
@@ -249,6 +263,34 @@ def test_events_with_prices_and_vehicle_versions(spark, after_day_one):
         ("d", "Listed", Decimal("9000.00"), None, 1),
     ]
     assert {r.event_date_key for r in rows} == {20261124}
+
+
+def test_two_attribute_changes_at_the_same_commit_time_get_their_own_versions(spark, lake):
+    """One transaction changed the vehicle twice: same commit time, different WAL positions -> different keys."""
+    land(lake, SNAPSHOT, "snapshot")
+    run_silver(spark, lake)
+    land(lake, [
+        event("U", 101, 10, before=raw("a"), after=raw("a", condition="good")),
+        event("U", 102, 10, before=raw("a", condition="good"), after=raw("a", condition="good", title_status="rebuilt")),
+    ])
+    run_all(spark, lake)
+
+    dim = gold(spark, lake, "dim_vehicle").filter(F.col("vehicle_id") == IDS["a"]).orderBy("version_number").collect()
+    assert [(r.version_number, r.condition, r.title_status, r.is_current) for r in dim] == [
+        (1, "Excellent", "Clean", False), (2, "Good", "Clean", False), (3, "Good", "Rebuilt", True),
+    ]
+    assert dim[1].valid_from == dim[2].valid_from == ts(10)  # same time, still three different keys
+    assert len({r.vehicle_version_key for r in dim}) == 3
+
+    events = (
+        gold(spark, lake, "fact_listing_event").filter(F.col("vehicle_key") == dim[0].vehicle_key)
+        .orderBy("lsn_num").collect()
+    )
+    assert [(e.event_type, e.vehicle_version_key) for e in events] == [
+        ("Snapshot", dim[0].vehicle_version_key),
+        ("Updated", dim[1].vehicle_version_key),
+        ("Updated", dim[2].vehicle_version_key),
+    ]
 
 
 def test_cdc_gold_diagram_matches_the_code(spark, lake):

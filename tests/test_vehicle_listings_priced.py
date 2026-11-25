@@ -13,7 +13,6 @@ from pyspark.sql import functions as F
 
 from conftest import SAMPLE_ROWS
 from notebook_utils import load_config_and_utils, run_notebook
-from test_vehicle_listings import run_listings_pipeline
 
 NOTEBOOK = "06_silver_vehicle_listings_priced.py"
 RATES_NOTEBOOK = "05_silver_exchange_rates.py"
@@ -86,6 +85,15 @@ def test_prices_are_converted_at_the_latest_rates(spark, tmp_path, catalog_untou
     assert rows["gbp"].price_usd == Decimal("6708.02")   # 5,000 / 0.8343 × 1.1193
     assert rows["usd"].price_aud == Decimal("2175.82")   # 1,500 / 1.1193 × 1.6236
     assert {str(r.fx_rate_date) for r in rows.values()} == {LATEST}
+
+
+def test_conversion_check_uses_the_same_rounding_as_spark(spark, tmp_path, catalog_untouched):
+    """19,950 EUR × 0.8343 = 16,644.285: Spark rounds half up to .29; the notebook's check must agree (it used float
+    round(), got .28 and stopped a correct run)."""
+    silver = tmp_path / "silver"
+    write_inputs(spark, silver, [("eur", "19950.00", "EUR")])
+    run_priced(spark, silver)
+    assert priced(spark)["eur"].price_gbp == Decimal("16644.29")
 
 
 def test_missing_price_or_currency_gives_null_prices(spark, tmp_path, catalog_untouched):
@@ -163,11 +171,9 @@ def test_view_name_uses_unity_catalog_on_databricks(spark, tmp_path):
     assert (namespace["UC_CATALOG"], namespace["UC_SILVER_SCHEMA"]) == ("dbw_used_cars_strahinja", "silver")
 
 
-def test_full_silver_pipeline_on_the_sample(spark, bronze_sample, silver_dir, catalog_untouched):
-    """stage × 4 → brand_lookup → 03 → 05 → 06, like the Databricks Jobs."""
-    run_listings_pipeline(spark, bronze_sample, silver_dir)
-    run_notebook(RATES_NOTEBOOK, namespace_without_catalog(spark, bronze_sample, silver_dir))
-    run_notebook(NOTEBOOK, namespace_without_catalog(spark, bronze_sample, silver_dir))
+def test_full_silver_pipeline_on_the_sample(spark, bronze_sample, sample_silver, catalog_untouched):
+    """The view over the Silver of the sample (stage × 4 → brand_lookup → 03 → 05, the shared fixture) → 06."""
+    run_notebook(NOTEBOOK, namespace_without_catalog(spark, bronze_sample, sample_silver))
 
     view = spark.table(VIEW)
     assert view.count() == 4 * SAMPLE_ROWS

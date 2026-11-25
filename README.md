@@ -158,8 +158,12 @@ repository.
 ```bash
 python -m venv .venv
 .venv/bin/pip install pyspark==4.1.4 delta-spark==4.1.0 pandas pytest
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest                          # fast set: everything except the tests marked slow
+.venv/bin/python -m pytest -m "slow or not slow"    # whole suite (~10 minutes)
 ```
+
+Tests marked `slow` are extra full pipeline runs whose notebooks a cheaper test already covers. The Silver of the
+sample is built once per run (`sample_silver` fixture) and shared by the Gold, data quality and view tests.
 
 ## Open points
 

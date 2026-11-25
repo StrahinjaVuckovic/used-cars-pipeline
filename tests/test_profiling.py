@@ -93,7 +93,7 @@ def run_profiling_notebook(spark, notebook, bronze_sample, tmp_path, widget_valu
     return run_notebook(f"profiling/{notebook}", namespace)
 
 
-@pytest.mark.parametrize("source", ["all", "Fourth"])
+@pytest.mark.parametrize("source", [pytest.param("all", marks=pytest.mark.slow), "Fourth"])
 def test_vehicle_sources_profile_runs(spark, bronze_sample, tmp_path, catalog_untouched, source):
     namespace = run_profiling_notebook(
         spark, "01_profile_vehicle_sources.py", bronze_sample, tmp_path,

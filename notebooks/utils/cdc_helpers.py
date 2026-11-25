@@ -238,13 +238,21 @@ def check_cdc_versions(df: DataFrame, table_name: str) -> dict:
 # COMMAND ----------
 
 
-def build_cdc_dim_vehicle(versions_df: DataFrame) -> DataFrame:
+def silver_version_order() -> list:
+    """Order of the Silver versions of one vehicle: time, then WAL position, a snapshot row before a change at the
+    same position. The WAL position also orders changes with the same commit time (one transaction)."""
+    return ["valid_from", "lsn_num", F.when(F.col("change_op") == SNAPSHOT_OP, 0).otherwise(1)]
+
+
+def assign_dimension_versions(versions_df: DataFrame) -> DataFrame:
     """
-    dim_vehicle with SCD Type 2 columns from the Silver history. Silver versions that follow each other with
-    the same dimension attributes are merged into one Gold version (a new price is a fact, not a new version
-    of the vehicle). Plus the Unknown member (both keys -1).
+    Every Silver version with the Gold dimension version it belongs to. Silver versions that follow each other
+    with the same dimension attributes form one Gold version (a new price is a fact, not a new version of the
+    vehicle). The Gold version key comes from the change that started it: xxhash64(vehicle_id, lsn_num,
+    change_op). Every change has its own WAL position, so two versions never share a key, not even when one
+    transaction changed the vehicle twice at the same commit time (a key from valid_from would collide there).
     """
-    order = Window.partitionBy("vehicle_id").orderBy("valid_from", "lsn_num")
+    order = Window.partitionBy("vehicle_id").orderBy(*silver_version_order())
     attribute_hash = F.col("_attribute_hash")
     starts_version = F.coalesce(
         F.lag(attribute_hash).over(order).isNull()
@@ -252,26 +260,42 @@ def build_cdc_dim_vehicle(versions_df: DataFrame) -> DataFrame:
         | (F.lag("valid_to").over(order) != F.col("valid_from")),  # gap: sold, then listed again
         F.lit(True),
     )
-    merged = (
-        versions_df.select("vehicle_id", "valid_from", "valid_to", "lsn_num", *vehicle_attributes())
+    first_change = F.min_by(F.struct("lsn_num", "change_op"), "_order").over(
+        Window.partitionBy("vehicle_id", "_group")
+    )
+    return (
+        versions_df.select("version_key", "vehicle_id", "valid_from", "valid_to", "lsn_num", "change_op",
+                           *vehicle_attributes())
         .withColumn("_attribute_hash", content_hash(CDC_DIM_ATTRIBUTES))
+        .withColumn("_order", F.struct(*[c if isinstance(c, Column) else F.col(c) for c in silver_version_order()]))
         .withColumn("_group", F.sum(starts_version.cast("int")).over(order))
-        .groupBy("vehicle_id", "_group")
+        .withColumn(
+            "vehicle_version_key",
+            surrogate_key(F.col("vehicle_id"), first_change["lsn_num"], first_change["change_op"]),
+        )
+    )
+
+
+def build_cdc_dim_vehicle(versions_df: DataFrame) -> DataFrame:
+    """dim_vehicle with SCD Type 2 columns from the Silver history, plus the Unknown member (both keys -1)."""
+    merged = (
+        assign_dimension_versions(versions_df)
+        .groupBy("vehicle_id", "vehicle_version_key")
         .agg(
+            F.min("_order").alias("_first"),
             F.min("valid_from").alias("valid_from"),
-            F.max_by("valid_to", "valid_from").alias("valid_to"),
+            F.max_by("valid_to", "_order").alias("valid_to"),
             *[F.first(c).alias(c) for c in CDC_DIM_ATTRIBUTES],
         )
     )
-    version_order = Window.partitionBy("vehicle_id").orderBy("valid_from")
-    is_last = F.lead("valid_from").over(version_order).isNull()
+    version_order = Window.partitionBy("vehicle_id").orderBy("_first")
+    is_last = F.lead("_first").over(version_order).isNull()
     dim = (
         merged
         .withColumn("version_number", F.row_number().over(version_order))
         .withColumn("is_current", F.col("valid_to").isNull())
         .withColumn("is_deleted", is_last & F.col("valid_to").isNotNull())  # last version closed = sold
         .withColumn("vehicle_key", surrogate_key("vehicle_id"))
-        .withColumn("vehicle_version_key", surrogate_key("vehicle_id", "valid_from"))
         .select(*CDC_GOLD_COLUMNS["dim_vehicle"])
     )
     return with_unknown_member(
@@ -285,17 +309,18 @@ def listing_events(versions_df: DataFrame) -> DataFrame:
     """
     One row per change from the Silver history: every version is a Snapshot / Listed / Price Change /
     Updated event at its `valid_from`; a version closed by a DELETE (no version starts at its `valid_to_lsn`)
-    adds a Sold event at its `valid_to`.
+    adds a Sold event at its `valid_to`. `version_key` is the Silver version the event opened or closed.
     """
-    order = Window.partitionBy("vehicle_id").orderBy("valid_from", "lsn_num")
+    order = Window.partitionBy("vehicle_id").orderBy(*silver_version_order())
     versions = (
-        versions_df.select("vehicle_id", "valid_from", "valid_to", "valid_to_lsn", "lsn_num", "change_op",
-                           "price", "currency", "odometer")
+        versions_df.select("version_key", "vehicle_id", "valid_from", "valid_to", "valid_to_lsn", "lsn_num",
+                           "change_op", "price", "currency", "odometer")
         .withColumn("_previous_price", F.lag("price").over(order))
         .withColumn("_next_lsn", F.lead("lsn_num").over(order))
     )
     first_state = F.col("change_op").isin(SNAPSHOT_OP, "I")
     opened = versions.select(
+        "version_key",
         "vehicle_id",
         F.col("valid_from").alias("event_ts"),
         "lsn_num",
@@ -311,6 +336,7 @@ def listing_events(versions_df: DataFrame) -> DataFrame:
     sold = versions.filter(
         F.col("valid_to").isNotNull() & (F.col("_next_lsn").isNull() | (F.col("_next_lsn") != F.col("valid_to_lsn")))
     ).select(
+        "version_key",
         "vehicle_id",
         F.col("valid_to").alias("event_ts"),
         F.col("valid_to_lsn").alias("lsn_num"),
@@ -323,30 +349,17 @@ def listing_events(versions_df: DataFrame) -> DataFrame:
     return opened.unionByName(sold).withColumn("price_change", F.col("price") - F.col("previous_price"))
 
 
-def build_fact_listing_event(versions_df: DataFrame, dim_df: DataFrame) -> DataFrame:
+def build_fact_listing_event(versions_df: DataFrame) -> DataFrame:
     """
-    fact_listing_event: every change event with the vehicle version that was valid at that moment
-    (point-in-time join: valid_from <= event time < valid_to; a Sold event belongs to the version it closed).
+    fact_listing_event: every change event with the vehicle version that was valid at that moment. The link
+    goes through the Silver version the event opened (or, for Sold, closed), so it is exact even when two
+    changes share a commit time; it is the same version a point-in-time join (valid_from <= event time <
+    valid_to) would find.
     """
-    events = listing_events(versions_df)
-    versions = dim_df.filter(F.col("vehicle_version_key") != UNKNOWN_KEY).select(
-        F.col("vehicle_id").alias("_vehicle_id"), "vehicle_version_key", "vehicle_key",
-        F.col("valid_from").alias("_valid_from"), F.col("valid_to").alias("_valid_to"),
-    )
-    valid_at_event = (
-        (F.col("_valid_from") <= F.col("event_ts"))
-        & (F.col("_valid_to").isNull() | (F.col("event_ts") < F.col("_valid_to")))
-    )
-    closed_by_event = F.col("_valid_to") == F.col("event_ts")
-    joined = events.join(
-        versions,
-        (F.col("vehicle_id") == F.col("_vehicle_id"))
-        & F.when(F.col("event_type") == "Sold", closed_by_event).otherwise(valid_at_event),
-        "left",
-    )
-    return joined.select(
+    version_of = assign_dimension_versions(versions_df).select("version_key", "vehicle_version_key")
+    return listing_events(versions_df).join(version_of, "version_key", "left").select(
         surrogate_key("vehicle_id", "lsn_num", "event_type").alias("event_key"),
-        F.coalesce("vehicle_key", surrogate_key("vehicle_id")).alias("vehicle_key"),
+        surrogate_key("vehicle_id").alias("vehicle_key"),
         F.coalesce("vehicle_version_key", F.lit(UNKNOWN_KEY).cast("bigint")).alias("vehicle_version_key"),
         date_key(F.to_date("event_ts")).alias("event_date_key"),
         "event_ts",

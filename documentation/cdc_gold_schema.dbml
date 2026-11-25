@@ -3,7 +3,7 @@
 // (tests/test_cdc_pipeline.py compares them). event_date_key uses the same yyyyMMdd keys as gold.dim_date.
 
 Table dim_vehicle {
-  vehicle_version_key bigint [pk, note: 'one version of a vehicle: xxhash64(vehicle_id, valid_from); -1 = Unknown']
+  vehicle_version_key bigint [pk, note: 'one version of a vehicle: xxhash64(vehicle_id, lsn_num, change_op) of the change that started it; -1 = Unknown']
   vehicle_key bigint [note: 'durable key, the same for all versions and the same as in the main gold.dim_vehicle']
   vehicle_id varchar
   vin varchar
@@ -32,7 +32,7 @@ Table dim_vehicle {
 Table fact_listing_event {
   event_key bigint [pk, note: 'xxhash64(vehicle_id, lsn_num, event_type)']
   vehicle_key bigint
-  vehicle_version_key bigint [ref: > dim_vehicle.vehicle_version_key, note: 'version valid at event_ts (point in time)']
+  vehicle_version_key bigint [ref: > dim_vehicle.vehicle_version_key, note: 'version valid at event_ts']
   event_date_key int [note: 'yyyyMMdd, role of gold.dim_date']
   event_ts timestamp
   event_type varchar [note: 'Snapshot / Listed / Price Change / Updated / Sold']

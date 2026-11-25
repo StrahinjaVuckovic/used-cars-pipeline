@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from pyspark.sql import functions as F
 
-from conftest import INGESTION_DATE, SAMPLE_ROWS
+from conftest import INGESTION_DATE, SAMPLE_ROWS, copy_silver
 from notebook_utils import load_config_and_utils, run_notebook, run_notebook_cells_until
 
 CLEANING_UTILS = "utils/vehicle_listings_cleaning.py"
@@ -430,34 +430,13 @@ def test_stage_notebook_has_no_unexpected_currency(spark, bronze_sample, tmp_pat
     assert "WARNING" not in capsys.readouterr().out
 
 
-def test_listings_notebook_needs_every_stage_table(spark, bronze_sample, tmp_path, catalog_untouched):
-    silver = tmp_path / "silver"
-    for source_system in ["First", "Second", "Third"]:
-        run_stage(spark, bronze_sample, silver, source_system)
-    with pytest.raises(AssertionError, match="No stage table for Fourth .* run 02_silver_stage_fourth_source first"):
-        run_listings(spark, bronze_sample, silver)
-    assert not (silver / "vehicle_listings").exists()
-
-
-def test_listings_notebook_rejects_mixed_ingestion_dates(spark, bronze_sample, tmp_path, catalog_untouched):
-    silver = tmp_path / "silver"
-    for source_system in SOURCES:
-        run_stage(spark, bronze_sample, silver, source_system)
-    third = str(silver / "vehicle_listings_stage" / "third")
-    older = spark.read.format("delta").load(third).withColumn("ingestion_date", F.to_date(F.lit("2026-11-02")))
-    older.write.format("delta").mode("overwrite").save(third)
-
-    with pytest.raises(AssertionError, match="different ingestion dates"):
-        run_listings(spark, bronze_sample, silver)
-    assert not (silver / "vehicle_listings").exists()
-
-
-def test_listings_notebook_checks_the_requested_ingestion_date(spark, bronze_sample, tmp_path, catalog_untouched):
-    silver = tmp_path / "silver"
-    for source_system in SOURCES:
-        run_stage(spark, bronze_sample, silver, source_system)
-    with pytest.raises(AssertionError, match=f"built from ingestion_date={INGESTION_DATE}, not 2026-11-05"):
-        run_listings(spark, bronze_sample, silver, ingestion_date="2026-11-05")
+@pytest.fixture(scope="module")
+def staged_silver(spark, bronze_sample, tmp_path_factory) -> Path:
+    """The four stage tables and the brand lookup of the sample, built once; the 03 error tests change a copy."""
+    silver = tmp_path_factory.mktemp("staged") / "silver"
+    run_all_stages(spark, bronze_sample, silver)
+    run_brand_lookup(spark, bronze_sample, silver)
+    return silver
 
 
 def run_all_stages(spark, bronze, silver):
@@ -465,29 +444,50 @@ def run_all_stages(spark, bronze, silver):
         run_stage(spark, bronze, silver, source_system)
 
 
-def test_listings_notebook_needs_the_brand_lookup(spark, bronze_sample, tmp_path, catalog_untouched):
-    silver = tmp_path / "silver"
-    run_all_stages(spark, bronze_sample, silver)
+def set_ingestion_date(spark, path, date):
+    older = spark.read.format("delta").load(str(path)).withColumn("ingestion_date", F.to_date(F.lit(date)))
+    older.write.format("delta").mode("overwrite").save(str(path))
+
+
+def test_listings_notebook_needs_every_stage_table(spark, bronze_sample, staged_silver, tmp_path, catalog_untouched):
+    silver = copy_silver(staged_silver, tmp_path, without=["vehicle_listings_stage/fourth"])
+    with pytest.raises(AssertionError, match="No stage table for Fourth .* run 02_silver_stage_fourth_source first"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
+def test_listings_notebook_rejects_mixed_ingestion_dates(spark, bronze_sample, staged_silver, tmp_path, catalog_untouched):
+    silver = copy_silver(staged_silver, tmp_path)
+    set_ingestion_date(spark, silver / "vehicle_listings_stage" / "third", "2026-11-02")
+    with pytest.raises(AssertionError, match="different ingestion dates"):
+        run_listings(spark, bronze_sample, silver)
+    assert not (silver / "vehicle_listings").exists()
+
+
+def test_listings_notebook_checks_the_requested_ingestion_date(spark, bronze_sample, staged_silver, tmp_path, catalog_untouched):
+    silver = copy_silver(staged_silver, tmp_path)
+    with pytest.raises(AssertionError, match=f"built from ingestion_date={INGESTION_DATE}, not 2026-11-05"):
+        run_listings(spark, bronze_sample, silver, ingestion_date="2026-11-05")
+
+
+def test_listings_notebook_needs_the_brand_lookup(spark, bronze_sample, staged_silver, tmp_path, catalog_untouched):
+    silver = copy_silver(staged_silver, tmp_path, without=["brand_lookup"])
     with pytest.raises(AssertionError, match="No brand lookup at .* run 02_silver_brand_lookup first"):
         run_listings(spark, bronze_sample, silver)
     assert not (silver / "vehicle_listings").exists()
 
 
 def test_listings_notebook_rejects_a_brand_lookup_from_another_ingestion(
-    spark, bronze_sample, tmp_path, catalog_untouched
+    spark, bronze_sample, staged_silver, tmp_path, catalog_untouched
 ):
-    silver = tmp_path / "silver"
-    run_all_stages(spark, bronze_sample, silver)
-    run_brand_lookup(spark, bronze_sample, silver)
-    lookup = str(silver / "brand_lookup")
-    older = spark.read.format("delta").load(lookup).withColumn("ingestion_date", F.to_date(F.lit("2026-11-02")))
-    older.write.format("delta").mode("overwrite").save(lookup)
-
+    silver = copy_silver(staged_silver, tmp_path)
+    set_ingestion_date(spark, silver / "brand_lookup", "2026-11-02")
     with pytest.raises(AssertionError, match=f"Brand lookup was built from ingestion_date=2026-11-02, the stage tables from {INGESTION_DATE}"):
         run_listings(spark, bronze_sample, silver)
     assert not (silver / "vehicle_listings").exists()
 
 
+@pytest.mark.slow  # another full pipeline run; test_full_pipeline_run covers the notebooks
 def test_full_pipeline_continues_with_unparsed_dates(spark, bronze_sample, tmp_path, catalog_untouched):
     """An impossible date in Bronze must not stop the pipeline: the row is written and flagged (option b)."""
     bronze = copy_bronze_and_edit_first_row(
@@ -505,6 +505,7 @@ def test_full_pipeline_continues_with_unparsed_dates(spark, bronze_sample, tmp_p
     assert namespace["unparsed_dates"] == 1
 
 
+@pytest.mark.slow  # another full pipeline run; test_full_pipeline_run covers the notebooks
 def test_dev_mode_writes_to_dev_tables(spark, bronze_sample, silver_dir, catalog_untouched):
     run_listings_pipeline(spark, bronze_sample, silver_dir, dev_mode="true")
     assert (silver_dir / "vehicle_listings_stage_dev" / "first" / "_delta_log").is_dir()

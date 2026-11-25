@@ -63,18 +63,41 @@ Vehicles with only regular maintenance score 100; vehicles without any service h
 Categories: Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor. The profiling behind every weight, worked examples and the
 verified distribution are in [`documentation/reliability_score.md`](documentation/reliability_score.md).
 
+## Change Data Capture demo
+
+A local demonstration of **log-based CDC** with **SCD Type 2 history** ([`documentation/cdc.md`](documentation/cdc.md)),
+next to the daily file pipeline:
+
+- A PostgreSQL database in Docker plays the operational database of a listing platform, filled with 80 % of a sample
+  of the Fourth source.
+- A simulator makes daily changes: new listings from the other 20 %, price drops, condition changes, sold cars.
+- `cdc/cdc_reader.py` reads only the changes from the database's write-ahead log (replication slot + wal2json) into
+  Bronze.
+- Silver applies them with MERGE into one table with every version (`valid_from` / `valid_to` / `is_current`).
+- Gold rebuilds an SCD2 `dim_vehicle` and a `fact_listing_event` from that history.
+
+In the verified 3-day run, every day processed about 7 % of the rows a full load would read. The Silver current
+state always equalled the source database, and a reader crash before confirming changed nothing.
+
+```bash
+.venv/bin/pip install -r cdc/requirements.txt
+.venv/bin/python -m cdc.run_demo --days 3 --crash-test
+```
+
 ## Repository structure
 
 ```
 adf/                    ADF pipelines, linked services, datasets and trigger (JSON exported from ADF Studio)
+cdc/                    CDC demo: PostgreSQL source (Docker), change simulator, WAL reader, local runner
 documentation/          silver_data_model.md, gold_data_model.md, gold_star_schema.dbml,
-                        reliability_score.md, orchestration.md
+                        reliability_score.md, orchestration.md, data_quality.md, cdc.md, cdc_gold_schema.dbml
 notebooks/              Databricks notebooks (source format), numbered in execution order
   00_config.py          storage access through the Key Vault-backed secret scope, paths, sources, logger
   01_…                  landing vs Bronze validation
   02_… – 06_…           Silver: one stage per vehicle source, brand lookup, union, service events,
                         exchange rates (incremental MERGE), priced view, data quality checks (gate before Gold)
   07_… – 09_…           Gold: dimensions, facts, Unity Catalog views, Reliability Score
+  10_… – 11_…           CDC demo: Silver version history (SCD2) and Gold SCD2 dimension + change facts
   utils/                shared helpers (cleaning, data quality, Delta writes, Gold keys and weights)
   profiling/            read-only profiling notebooks behind the cleaning rules and the score
 orchestration/          Databricks Job definitions (YAML, "View as code" format)

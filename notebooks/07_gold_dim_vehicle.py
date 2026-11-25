@@ -36,11 +36,6 @@ INGESTION_DATE = dbutils.widgets.get("ingestion_date").strip()
 DEV_MODE = dbutils.widgets.get("dev_mode") == "true"
 TABLE_NAME = "dim_vehicle"
 
-# Descriptive attributes shown in Title Case with "Unknown" for missing values.
-DESCRIPTIVE_COLUMNS = [
-    "condition", "fuel", "transmission", "drive", "size", "body_type", "paint_color", "title_status",
-]
-
 log = get_logger("07_gold_dim_vehicle")
 log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}")
 
@@ -64,14 +59,7 @@ def build_dim_vehicle(listings_df: DataFrame, service_events_df: DataFrame) -> D
         .select(
             surrogate_key("vehicle_id").alias("vehicle_key"),
             "vehicle_id",
-            "vin",
-            "manufacture_year",
-            manufacturer_display_name("manufacturer").alias("manufacturer"),
-            F.coalesce("model", F.lit(UNKNOWN_LABEL)).alias("model"),
-            F.coalesce("manufacturer_source", F.lit("unknown")).alias("manufacturer_source"),
-            *[display_or_unknown(c).alias(c) for c in DESCRIPTIVE_COLUMNS],
-            "cylinders",
-            "listing_url",
+            *vehicle_attributes(),
             F.coalesce("has_service_history", F.lit(False)).alias("has_service_history"),
         )
     )

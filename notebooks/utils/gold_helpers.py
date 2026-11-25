@@ -99,6 +99,21 @@ GOLD_COLUMNS = {
     ],
 }
 
+# Gold tables of the CDC demo (documentation/cdc.md, documentation/cdc_gold_schema.dbml), stored under gold/cdc/
+# so the demo never touches the main star schema. dim_vehicle is the same dimension as above (without
+# has_service_history: the demo has no service book) plus the SCD Type 2 columns.
+CDC_GOLD_COLUMNS = {
+    "dim_vehicle": [
+        "vehicle_version_key",
+        *[c for c in GOLD_COLUMNS["dim_vehicle"] if c != "has_service_history"],
+        "valid_from", "valid_to", "is_current", "is_deleted", "version_number",
+    ],
+    "fact_listing_event": [
+        "event_key", "vehicle_key", "vehicle_version_key", "event_date_key", "event_ts", "event_type",
+        "lsn_num", "price", "previous_price", "price_change", "currency", "odometer",
+    ],
+}
+
 # Reliability Score (documentation/reliability_score.md): 100 minus explainable penalties, clamped to 0-100.
 RELIABILITY_WEIGHTS = {
     # per repair incident: by kind of failure, see FAILURE_TYPES / OTHER_FAILURE
@@ -196,6 +211,29 @@ def manufacturer_display_name(column) -> Column:
     column = F.col(column) if isinstance(column, str) else column
     special = F.create_map(*[F.lit(v) for pair in MANUFACTURER_DISPLAY_NAMES.items() for v in pair])
     return F.coalesce(special[column], F.initcap(column), F.lit(UNKNOWN_LABEL))
+
+
+# Descriptive vehicle attributes shown in Title Case with "Unknown" for missing values.
+VEHICLE_DESCRIPTIVE_COLUMNS = [
+    "condition", "fuel", "transmission", "drive", "size", "body_type", "paint_color", "title_status",
+]
+
+
+def vehicle_attributes() -> list:
+    """
+    The business-ready attributes of a vehicle (Silver listing columns -> dim_vehicle values), shared by
+    07_gold_dim_vehicle and the SCD2 dimension of the CDC demo (11_gold_cdc_vehicle_history).
+    """
+    return [
+        "vin",
+        "manufacture_year",
+        manufacturer_display_name("manufacturer").alias("manufacturer"),
+        F.coalesce("model", F.lit(UNKNOWN_LABEL)).alias("model"),
+        F.coalesce("manufacturer_source", F.lit("unknown")).alias("manufacturer_source"),
+        *[display_or_unknown(c).alias(c) for c in VEHICLE_DESCRIPTIVE_COLUMNS],
+        "cylinders",
+        "listing_url",
+    ]
 
 
 def with_unknown_member(df: DataFrame, key_column: str, values: dict = None) -> DataFrame:

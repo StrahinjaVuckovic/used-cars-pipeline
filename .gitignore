@@ -9,3 +9,4 @@ __pycache__/
 FourthSourceSystem*
 .venv/
 .pytest_cache/
+cdc_data/

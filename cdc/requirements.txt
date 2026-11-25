@@ -1,0 +1,2 @@
+# Extra Python package of the local CDC demo (on top of pyspark, delta-spark and pytest of the project).
+psycopg2-binary==2.9.13

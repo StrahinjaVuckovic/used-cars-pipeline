@@ -32,8 +32,6 @@
 
 # COMMAND ----------
 
-import re
-
 dbutils.widgets.text("ingestion_date", "latest")
 dbutils.widgets.dropdown("dev_mode", "true", ["true", "false"])
 
@@ -46,63 +44,8 @@ OUTPUT_FILES = 4
 TABLE_NAME = "vehicle_listings_dev" if DEV_MODE else "vehicle_listings"
 TARGET_PATH = f"{SILVER_PATH}/{TABLE_NAME}"
 
-# Final column order of silver.vehicle_listings (must match the documentation):
-# the stage columns with the brand columns right after model_normalized.
-BRAND_COLUMNS = ["manufacturer", "manufacturer_source"]
-_brand_position = STAGE_COLUMNS.index("model_normalized") + 1
-VEHICLE_LISTINGS_COLUMNS = STAGE_COLUMNS[:_brand_position] + BRAND_COLUMNS + STAGE_COLUMNS[_brand_position:]
-
 log = get_logger("03_silver_vehicle_listings")
 log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_PATH}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Brand mapping functions (model → manufacturer)
-# MAGIC
-# MAGIC Rules come from `notebooks/profiling/03_profile_brand_lookup.py`:
-# MAGIC - The lookup is cleaned by `02_silver_brand_lookup` (normalized like `model_normalized`, one manufacturer
-# MAGIC   per model, conflicting models such as `astra` removed). Listings join it on `model_normalized`.
-# MAGIC - Listings whose model is not in the lookup get the manufacturer from the listing URL when the URL slug
-# MAGIC   contains a known manufacturer (Craigslist URLs look like `.../d/city-2018-cadillac-xt5-crossover/...`).
-# MAGIC - `manufacturer_source` says where the value came from: `lookup`, `listing_url` or null (unknown).
-# MAGIC   An unknown manufacturer is missing data, not an invalid value, so it is not a DQ issue.
-
-# COMMAND ----------
-
-
-def manufacturer_from_url(url: Column, manufacturers: list) -> Column:
-    """
-    The first known manufacturer that appears as a whole word in the URL slug, or null.
-
-    Spaces in a name are written as "-" in URLs ("land rover" -> "land-rover"). Longer names are tried first,
-    so "land-rover" wins over "rover"; the leftmost match wins, which in a "year-brand-model" slug is the brand.
-    """
-    url_tokens = {m.replace(" ", "-"): m for m in manufacturers}
-    if not url_tokens:
-        return F.lit(None).cast("string")
-    alternatives = "|".join(re.escape(token) for token in sorted(url_tokens, key=len, reverse=True))
-    token = F.regexp_extract(F.lower(url), rf"[/\-]({alternatives})[\-/.]", 1)
-    token_to_manufacturer = F.create_map(*[F.lit(x) for pair in url_tokens.items() for x in pair])
-    return F.when(token != "", token_to_manufacturer[token])
-
-
-def add_manufacturer(listings_df: DataFrame, lookup_df: DataFrame) -> DataFrame:
-    """Add `manufacturer` and `manufacturer_source`: lookup first, then the listing URL, otherwise null."""
-    manufacturers = [row.manufacturer for row in lookup_df.select("manufacturer").distinct().collect()]
-    from_url = manufacturer_from_url(F.col("listing_url"), manufacturers)
-    return (
-        listings_df.join(F.broadcast(lookup_df.withColumnRenamed("manufacturer", "_lookup_manufacturer")),
-                         "model_normalized", "left")
-        .withColumn("manufacturer", F.coalesce(F.col("_lookup_manufacturer"), from_url))
-        .withColumn(
-            "manufacturer_source",
-            F.when(F.col("_lookup_manufacturer").isNotNull(), F.lit("lookup"))
-            .when(F.col("manufacturer").isNotNull(), F.lit("listing_url")),
-        )
-        .drop("_lookup_manufacturer")
-    )
-
 
 # COMMAND ----------
 

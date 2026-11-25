@@ -1,0 +1,46 @@
+// Gold tables of the CDC demo (documentation/cdc.md), stored under gold/cdc/.
+// Paste into https://dbdiagram.io. Column order = CDC_GOLD_COLUMNS in notebooks/utils/gold_helpers.py
+// (tests/test_cdc_pipeline.py compares them). event_date_key uses the same yyyyMMdd keys as gold.dim_date.
+
+Table dim_vehicle {
+  vehicle_version_key bigint [pk, note: 'one version of a vehicle: xxhash64(vehicle_id, valid_from); -1 = Unknown']
+  vehicle_key bigint [note: 'durable key, the same for all versions and the same as in the main gold.dim_vehicle']
+  vehicle_id varchar
+  vin varchar
+  manufacture_year int
+  manufacturer varchar
+  model varchar
+  manufacturer_source varchar
+  condition varchar
+  cylinders int
+  fuel varchar
+  transmission varchar
+  drive varchar
+  size varchar
+  body_type varchar
+  paint_color varchar
+  title_status varchar
+  listing_url varchar
+  valid_from timestamp [note: 'commit time of the change that started this version (from the WAL)']
+  valid_to timestamp [note: 'null while the version is valid']
+  is_current boolean
+  is_deleted boolean [note: 'last version of a sold vehicle (closed by a DELETE)']
+  version_number int
+  Note: 'SCD Type 2: a new version only when a vehicle attribute changes; prices are facts'
+}
+
+Table fact_listing_event {
+  event_key bigint [pk, note: 'xxhash64(vehicle_id, lsn_num, event_type)']
+  vehicle_key bigint
+  vehicle_version_key bigint [ref: > dim_vehicle.vehicle_version_key, note: 'version valid at event_ts (point in time)']
+  event_date_key int [note: 'yyyyMMdd, role of gold.dim_date']
+  event_ts timestamp
+  event_type varchar [note: 'Snapshot / Listed / Price Change / Updated / Sold']
+  lsn_num bigint [note: 'WAL position of the change']
+  price decimal(18,2)
+  previous_price decimal(18,2)
+  price_change decimal(19,2)
+  currency varchar
+  odometer int
+  Note: 'One row per change of a listing'
+}

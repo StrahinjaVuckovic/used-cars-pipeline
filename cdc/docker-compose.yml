@@ -1,0 +1,28 @@
+# Local "source system" of the CDC demo (documentation/cdc.md): the operational database of a listing platform.
+# Credentials come from the project .env (gitignored):  docker compose --env-file ../.env up -d --build --wait
+services:
+  postgres:
+    build: ./docker
+    image: used-cars-cdc-postgres:16
+    container_name: used-cars-cdc-postgres
+    environment:
+      POSTGRES_DB: listings_source
+      POSTGRES_USER: ${CDC_PG_USER:?set CDC_PG_USER in .env}
+      POSTGRES_PASSWORD: ${CDC_PG_PASSWORD:?set CDC_PG_PASSWORD in .env}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical          # write enough to the WAL for logical decoding
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+      - -c
+      - output_plugin_libraries=wal2json   # allow wal2json as a logical decoding output plugin
+    ports:
+      - "127.0.0.1:55432:5432"     # localhost only; 5432 is often taken by a local PostgreSQL
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d listings_source"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

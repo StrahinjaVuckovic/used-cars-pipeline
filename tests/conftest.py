@@ -37,6 +37,9 @@ def spark(tmp_path_factory):
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.default.parallelism", "2")
         .config("spark.ui.enabled", "false")
+        # One session serves the whole suite (~290 tests, many cached DataFrames and Delta tables); the default
+        # 1 GB heap ran out after ~25 minutes (java.lang.OutOfMemoryError: Java heap space).
+        .config("spark.driver.memory", "2g")
         .config("spark.sql.session.timeZone", "UTC")
         # Databricks Runtime 18 runs with ANSI mode on; keep it explicit so tests behave the same.
         .config("spark.sql.ansi.enabled", "true")

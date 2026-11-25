@@ -126,10 +126,10 @@ def test_foreign_key_check_names_the_orphans(spark, helpers):
 # ---------- dbml = code ----------
 
 
-def dbml_tables() -> dict:
-    """{table: [columns]} from the Table blocks of the .dbml file (Note lines, comments and indexes are skipped)."""
+def dbml_tables(path=DBML_PATH) -> dict:
+    """{table: [columns]} from the Table blocks of a .dbml file (Note lines, comments and indexes are skipped)."""
     tables, current, in_indexes = {}, None, False
-    for line in DBML_PATH.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         header = re.match(r"Table (\w+)", line)
         if header:

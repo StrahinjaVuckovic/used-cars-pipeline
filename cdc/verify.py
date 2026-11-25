@@ -4,8 +4,8 @@ End-to-end check of the CDC demo after a run: the lakehouse must hold exactly th
 - Silver: the current versions (`WHERE is_current`) equal the PostgreSQL table, row by row, after the same
   cleaning (same ids, same hash of the business columns); the SCD2 rules hold (one current version per listing,
   no overlapping periods).
-- Gold: the current versions of dim_vehicle have the current attributes of Silver; one Sold event per DELETE the
-  simulator made; every event is linked to a vehicle version.
+- Gold: dim_vehicle holds exactly the current Silver versions (one row per vehicle); every listing the simulator
+  deleted has no current version in Silver.
 """
 
 from datetime import date
@@ -24,7 +24,7 @@ def source_state(spark, ns: dict, rows: list):
     )
     lookup = ns["read_delta_table"](ns["brand_lookup_path"](False)).select("model_normalized", "manufacturer")
     return ns["add_manufacturer"](cleaned, lookup).select(
-        "vehicle_id", ns["content_hash"](ns["CDC_BUSINESS_COLUMNS"]).alias("row_hash")
+        "vehicle_id", ns["content_hash"](ns["SCD2_BUSINESS_COLUMNS"]).alias("row_hash")
     )
 
 
@@ -37,7 +37,7 @@ def verify(spark, expected_sold: int, silver=settings.SILVER_DIR, gold=settings.
         conn.close()
 
     history = ns["read_delta_table"](ns["cdc_silver_path"](False))
-    counts = ns["check_cdc_versions"](history, "vehicle_listings_cdc")
+    counts = ns["check_scd2_versions"](history, "vehicle_listings_cdc")
     current = history.filter("is_current").select("vehicle_id", "row_hash")
     source = source_state(spark, ns, rows)
     only_in_source = source.exceptAll(current).count()
@@ -47,27 +47,22 @@ def verify(spark, expected_sold: int, silver=settings.SILVER_DIR, gold=settings.
         f"{only_in_silver} only in Silver"
     )
 
-    dim = ns["read_delta_table"](ns["cdc_gold_path"]("dim_vehicle", False)).filter("vehicle_version_key <> -1")
-    fact = ns["read_delta_table"](ns["cdc_gold_path"]("fact_listing_event", False))
-    attributes = ns["CDC_DIM_ATTRIBUTES"]
-    silver_attributes = history.filter("is_current").select(
-        "vehicle_id", *ns["vehicle_attributes"]()
-    ).select("vehicle_id", ns["content_hash"](attributes).alias("h"))
-    gold_attributes = dim.filter("is_current").select("vehicle_id", ns["content_hash"](attributes).alias("h"))
-    differing = silver_attributes.exceptAll(gold_attributes).count() + gold_attributes.exceptAll(silver_attributes).count()
-    assert differing == 0, f"dim_vehicle: {differing} current versions differ from the Silver attributes"
+    dim = ns["read_delta_table"](ns["cdc_gold_path"]("dim_vehicle", False)).filter("vehicle_key <> -1")
+    attributes = ["vehicle_id", *[c for c in ns["CURRENT_DIM_VEHICLE_COLUMNS"] if c not in ("vehicle_key", "vehicle_id")]]
+    silver_attributes = history.filter("is_current").select("vehicle_id", *ns["vehicle_attributes"]()).select(*attributes)
+    differing = silver_attributes.exceptAll(dim.select(*attributes)).count() + dim.select(*attributes).exceptAll(silver_attributes).count()
+    assert differing == 0, f"dim_vehicle: {differing} rows differ from the current Silver versions"
 
-    sold = fact.filter("event_type = 'Sold'").count()
-    assert sold == expected_sold, f"fact_listing_event: {sold} Sold events, the simulator deleted {expected_sold}"
-    assert fact.filter("vehicle_version_key = -1").count() == 0, "fact_listing_event: events without a version"
+    sold = history.join(history.filter("is_current").select("vehicle_id"), "vehicle_id", "left_anti") \
+        .select("vehicle_id").distinct().count()
+    assert sold == expected_sold, f"Silver: {sold} listings without a current version, the simulator deleted {expected_sold}"
 
     result = {
         "source_listings": len(rows),
         "silver_versions": counts["versions"],
         "silver_current": counts["current_versions"],
-        "gold_vehicle_versions": dim.count(),
-        "gold_vehicles_with_several_versions": dim.groupBy("vehicle_id").count().filter("count > 1").count(),
-        "gold_events": dict(fact.groupBy("event_type").count().collect()),
+        "gold_current_vehicles": dim.count(),
+        "sold_listings": sold,
     }
-    print(f"Verified: Silver current state == PostgreSQL ({len(rows)} listings), SCD2 rules hold, Gold consistent")
+    print(f"Verified: Silver current state == PostgreSQL ({len(rows)} listings), SCD2 rules hold, Gold = current state")
     return result

@@ -43,6 +43,9 @@ def spark(tmp_path_factory):
         # Delta rebuilds the state of a table in 50 tasks by default (sized for big clusters); the test tables have a
         # few rows, so 2 tasks are enough and every Delta read/write is much faster. Local tests only.
         .config("spark.databricks.delta.snapshotPartitions", "2")
+        # Local only: pyspark 4.1.4 cannot read the checkpoint files delta-spark 4.1.0 writes after 10 commits
+        # (NoSuchMethodError in ParquetToSparkSchemaConverter); Databricks is not affected.
+        .config("spark.databricks.delta.properties.defaults.checkpointInterval", "1000")
         .config("spark.sql.session.timeZone", "UTC")
         # Databricks Runtime 18 runs with ANSI mode on; keep it explicit so tests behave the same.
         .config("spark.sql.ansi.enabled", "true")

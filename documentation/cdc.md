@@ -37,8 +37,7 @@ cdc/simulate_changes ─► PostgreSQL 16 (Docker, wal_level=logical, table list
   DELETE = sold)               cdc/cdc_reader ── replication slot + wal2json ──► bronze/ListingChanges/ingestion_date=…/*.json
                                                                                      │
                        notebooks/10_silver_listing_changes ──► silver/vehicle_listings_cdc   (every version, SCD2 columns)
-                       notebooks/11_gold_cdc_vehicle_history ─► gold/cdc/dim_vehicle         (SCD2 dimension)
-                                                             └► gold/cdc/fact_listing_event  (one row per change)
+                       notebooks/11_gold_cdc_vehicle_history ─► gold/cdc/dim_vehicle         (current state only)
 ```
 
 The PostgreSQL database plays the **source system** (the platform's operational database), not our storage.
@@ -94,16 +93,18 @@ unchanged by definition. Debezium has the same gap and writes a placeholder valu
 
 | Column | Meaning |
 |---|---|
-| `version_key` | one version: `xxhash64(vehicle_id, lsn_num, change_op)` |
+| `version_key` | one version: `xxhash64(vehicle_id, change_seq, change_op)` |
 | `row_hash` | SHA-256 of the cleaned business columns (lineage and DQ summary excluded) |
 | `change_op` | R / I / U: the change that opened the version |
-| `lsn_num` | WAL position of that change |
+| `change_seq` | order of that change in the source: here its WAL position (`lsn_num` of the event) |
 | `valid_from` / `valid_to` | commit time of the opening / closing change (event time from the WAL, not the processing time) |
-| `valid_to_lsn` | WAL position of the closing change (an UPDATE or the DELETE) |
+| `valid_to_seq` | `change_seq` of the closing change (an UPDATE or the DELETE) |
 | `is_current` | `valid_to` is null; **the current state is `WHERE is_current`** |
 
 There are no separate "SCD tables": a version table with `valid_from`, `valid_to` and `is_current` *is* SCD
-Type 2.
+Type 2. The incremental file load ([`incremental_load.md`](incremental_load.md)) fills a table with exactly the
+same columns: both use `notebooks/utils/scd2_helpers.py`, only the way the changes arrive differs. The column is
+called `change_seq`, not `lsn_num`, because for the file it is a record number, not a WAL position.
 
 Steps of one run:
 1. Read the Bronze partitions from the newest date already in the table up to `ingestion_date`.
@@ -122,37 +123,27 @@ Steps of one run:
    - `valid_to` empty exactly when the version is current;
    - no overlapping periods.
 
-## Gold: SCD2 dimension and change facts (`11_gold_cdc_vehicle_history`)
+## Gold: current state only (`11_gold_cdc_vehicle_history`)
 
-The history lives in Silver, so Gold stays a **full rebuild** like the rest of the Gold layer. Rebuilding Gold
-never loses history. The tables are stored under `gold/cdc/` so the demo never overwrites the main
-`gold.dim_vehicle`. Diagram: [`cdc_gold_schema.dbml`](cdc_gold_schema.dbml).
+**Mentor's decision (2026-11-25):**
+- Silver keeps the history (`valid_from`, `valid_to`, `is_current`);
+- Gold holds **only the current state**.
 
-- **`dim_vehicle`** is the same dimension as the main one: the same business-ready attributes from
-  `vehicle_attributes()` in `gold_helpers`. It has no `has_service_history`, because the demo has no service
-  book. It adds the SCD2 columns:
-  - `vehicle_key`: the **durable** key, the same for all versions and the same as in the main Gold;
-  - `vehicle_version_key`: the version key, `xxhash64(vehicle_id, lsn_num, change_op)` of the change that started
-    the version. It is not built from `valid_from`: changes inside one transaction share a commit time, so a
-    time-based key would collide, while every change has its own WAL position;
-  - `valid_from`, `valid_to`, `is_current`, `is_deleted` (sold), `version_number`.
+`gold/cdc/dim_vehicle` = the current Silver versions (`WHERE is_current`), one row per vehicle that exists in the
+source now:
+- the same business-ready attributes as the main `gold.dim_vehicle` (`vehicle_attributes()` in `gold_helpers`);
+- the same key `vehicle_key = xxhash64(vehicle_id)` and the Unknown member −1;
+- no `has_service_history`, because the demo has no service book.
 
-  A new version starts only when a **vehicle attribute** changes, e.g. the condition or the title status.
-  Price and kilometres are measures of events, not attributes, so consecutive Silver versions with the same
-  attributes are merged into one Gold version.
-- **`fact_listing_event`**: one row per change, with `event_type` Snapshot / Listed / Price Change / Updated /
-  Sold, plus `price`, `previous_price` and `price_change`. Every event points to the vehicle version that was
-  valid at that moment. That is the version a point-in-time join (`valid_from ≤ event_ts < valid_to`) would
-  find, but the link is made through the Silver version the event opened (a Sold event: the version it
-  closed), so it stays exact when two changes share a commit time. Analysts join on `vehicle_version_key`
-  for "the vehicle as it was then", on `vehicle_key` + `is_current` for "as it is now", and use
-  `valid_from` / `valid_to` only for an arbitrary moment that is not an event.
+It is rebuilt on every run (SCD Type 1 in Gold), and a sold listing simply disappears from it.
+Diagram: [`scd2_gold_schema.dbml`](scd2_gold_schema.dbml).
 
-Questions this answers, which a full snapshot cannot (examples in the notebook report):
-- the price of every listing at a given moment;
-- the number and average size of price drops per manufacturer;
-- the time from listing to sale;
-- the listings whose condition changed.
+**What this means for analysts:** questions over time go to the Silver history, e.g. the price of a listing on a
+given day, how often prices dropped, or when a listing disappeared. Gold answers "how is it now".
+
+*Earlier version (2026-11-24/25), replaced by the decision above:* Gold had an SCD2 `dim_vehicle` with version keys
+and a `fact_listing_event` with every change. It was removed to keep Gold simple and the same as the main star
+schema.
 
 ## How to run
 
@@ -174,7 +165,8 @@ are in Bronze.
 **Tests:**
 - `tests/test_cdc_simulator.py`: WAL message parsing, TOAST fill, the simulator, the data split.
 - `tests/test_cdc_pipeline.py`: hand-written change files. It covers every SCD2 rule, re-delivery, a partly
-  applied file, a change at the snapshot LSN, the Gold dimension (also two changes at the same commit time), the facts and the diagram.
+  applied file, a change at the snapshot LSN, two changes at the same commit time, the current-only Gold dimension and
+  the diagram.
 - The end-to-end test against PostgreSQL is opt-in, because it resets the demo database:
   `CDC_INTEGRATION=1 .venv/bin/python -m pytest -m cdc_integration`.
 
@@ -183,26 +175,24 @@ are in Bronze.
 After every day, `cdc/verify.py` checked:
 - the **current Silver state equals the PostgreSQL table** row by row, after the same cleaning;
 - the SCD2 rules hold;
-- the Gold current versions have the current Silver attributes;
-- there is one Sold event per DELETE;
-- every event has a vehicle version.
+- Gold holds exactly the current Silver versions;
+- every listing the simulator deleted has no current version in Silver.
 
-| Day | Changes read (I / U / D) | Listings in the source | Silver versions | Gold vehicle versions | Changes vs. full load |
-|---|---|---|---|---|---|
-| 0 | snapshot 16,000 | 16,000 | 16,000 | 16,000 | – |
-| 1 | 1,127 (320 / 647 / 160) | 16,160 | 16,967 | 16,400 | 7.0 % |
-| 2 | 1,147 (323 / 662 / 162) | 16,321 | 17,951 | 16,804 | 7.0 % |
-| 3 | 1,160 (326 / 671 / 163) | 16,484 | 18,948 | 17,212 | 7.0 % |
+| Day | Changes read (I / U / D) | Listings in the source | Silver versions | Changes vs. full load |
+|---|---|---|---|---|
+| 0 | snapshot 16,000 | 16,000 | 16,000 | – |
+| 1 | 1,127 (320 / 647 / 160) | 16,160 | 16,967 | 7.0 % |
+| 2 | 1,147 (323 / 662 / 162) | 16,321 | 17,951 | 7.0 % |
+| 3 | 1,160 (326 / 671 / 163) | 16,484 | 18,948 | 7.0 % |
 
 - **Crash test on day 3:** the reader wrote the changes without confirming them, and the next read delivered the
   same 1,160 changes again. Silver applied nothing and the table stayed unchanged.
 - A read with no new changes found 0 changes.
 - WAL still held by the slot at the end: 34 KB.
 
-Gold events after day 3: 16,000 Snapshot, 969 Listed, 1,698 Price Change, 281 Updated, 485 Sold.
-- "Updated" covers the 243 attribute changes, plus kilometre-only updates of listings without a valid price.
-- In the simulation, every "day" takes seconds, so the times on the market are short. The logic is the same as
-  with real days.
+- In the simulation, every "day" takes seconds; the logic is the same as with real days.
+- After the switch to the current-only Gold (2026-11-25), the end-to-end test against PostgreSQL (2 days + crash
+  test) passed again.
 
 ## In production
 

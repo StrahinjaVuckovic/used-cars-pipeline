@@ -37,6 +37,10 @@
 
 # COMMAND ----------
 
+# MAGIC %run ./utils/scd2_helpers
+
+# COMMAND ----------
+
 # MAGIC %run ./utils/cdc_helpers
 
 # COMMAND ----------
@@ -59,8 +63,8 @@ log.info(f"ingestion_date={INGESTION_DATE}, dev_mode={DEV_MODE}, target={TARGET_
 # COMMAND ----------
 
 table_exists = delta_table_exists(TARGET_PATH)
-table_df = read_delta_table(TARGET_PATH) if table_exists else None
-watermark = change_watermark(table_df) if table_exists else None
+table_df = read_table_snapshot(TARGET_PATH) if table_exists else None  # pinned: we write to it below
+watermark = applied_watermark(table_df) if table_exists else None
 watermark_date = (
     str(table_df.agg(F.max("ingestion_date")).first()[0]) if table_exists else None
 )
@@ -110,12 +114,7 @@ if versions_count == 0:
         _ = cached.unpersist()
     dbutils.notebook.exit("nothing to apply")
 
-if table_exists:
-    metrics = merge_delta_table(versions_df, TARGET_PATH, ["version_key"])
-    inserted, closed = metrics.get("numTargetRowsInserted", 0), metrics.get("numTargetRowsUpdated", 0)
-else:
-    write_delta_table(versions_df, TARGET_PATH, num_files=1)
-    inserted, closed = versions_count, 0
+inserted, closed = apply_versions(versions_df, TARGET_PATH, table_exists)
 
 skipped_changes = new_count - by_op.get(DELETE_OP, 0) - inserted
 log.info(
@@ -130,10 +129,10 @@ log.info(
 # COMMAND ----------
 
 history_df = read_delta_table(TARGET_PATH)
-counts = check_cdc_versions(history_df, TABLE_NAME)
+counts = check_scd2_versions(history_df, TABLE_NAME)
 log.info(
     f"{TABLE_NAME}: {counts['versions']} versions of {counts['vehicles']} listings, "
-    f"{counts['current_versions']} current (the source state); new watermark LSN {change_watermark(history_df)}"
+    f"{counts['current_versions']} current (the source state); new watermark LSN {applied_watermark(history_df)}"
 )
 
 for cached in (events_df, new_events_df, lookup_df, changes_df, versions_df):

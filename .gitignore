@@ -10,3 +10,4 @@ FourthSourceSystem*
 .venv/
 .pytest_cache/
 cdc_data/
+incremental_data/

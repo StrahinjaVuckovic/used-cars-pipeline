@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
 HOST = "127.0.0.1"
-PORT = 55432  # mapped in docker-compose.yml (localhost only)
+PORT = 55432  # mapped in docker-compose.yml
 DATABASE = "listings_source"
 TABLE = "listings"
 SLOT_NAME = "listings_cdc"

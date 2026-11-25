@@ -20,7 +20,7 @@ from test_gold import dbml_tables
 
 DAY = "2026-11-24"
 START = datetime(2026, 11, 24, 8, 0, tzinfo=timezone.utc)
-CDC_DBML_PATH = PROJECT_ROOT / "documentation" / "cdc_gold_schema.dbml"
+GOLD_DBML_PATH = PROJECT_ROOT / "documentation" / "scd2_gold_schema.dbml"
 IDS = {"a": "aaaaaaaaaaa1", "b": "bbbbbbbbbbb2", "c": "ccccccccccc3", "d": "ddddddddddd4"}
 
 
@@ -144,19 +144,19 @@ def test_two_changes_of_one_listing_give_two_versions_in_wal_order(spark, after_
     assert [r.price for r in a] == [Decimal("15000.00"), Decimal("14000.00"), Decimal("13000.00")]
     assert [r.is_current for r in a] == [False, False, True]
     assert [(r.valid_from, r.valid_to) for r in a] == [(ts(0), ts(10)), (ts(10), ts(20)), (ts(20), None)]
-    assert a[1].valid_to_lsn == 102
+    assert a[1].valid_to_seq == 102
 
 
 def test_change_without_new_values_makes_no_version(spark, after_day_one):
     b = versions_of(spark, after_day_one, "b")
     assert [r.condition for r in b] == ["excellent", "good"]
-    assert b[-1].is_current and b[-1].lsn_num == 103
+    assert b[-1].is_current and b[-1].change_seq == 103
 
 
 def test_delete_closes_the_version_without_a_new_one(spark, after_day_one):
     c = versions_of(spark, after_day_one, "c")
     assert len(c) == 1 and not c[0].is_current
-    assert (c[0].valid_to, c[0].valid_to_lsn) == (ts(40), 104)
+    assert (c[0].valid_to, c[0].valid_to_seq) == (ts(40), 104)
 
 
 def test_current_state_is_the_source_state(spark, after_day_one):
@@ -195,15 +195,15 @@ def test_first_run_needs_the_snapshot(spark, lake):
         run_silver(spark, lake)
 
 
-def test_check_cdc_versions_finds_overlapping_versions(spark, after_day_one):
+def test_check_scd2_versions_finds_overlapping_versions(spark, after_day_one):
     namespace = local_pipeline.namespace(spark, **after_day_one)
     df = history(spark, after_day_one)
-    broken = df.withColumn("valid_to", F.when(F.col("lsn_num") == 101, F.lit(ts(25))).otherwise(F.col("valid_to")))
+    broken = df.withColumn("valid_to", F.when(F.col("change_seq") == 101, F.lit(ts(25))).otherwise(F.col("valid_to")))
     with pytest.raises(AssertionError, match="overlap"):
-        namespace["check_cdc_versions"](broken, "x")
+        namespace["check_scd2_versions"](broken, "x")
     two_current = df.withColumn("is_current", F.lit(True)).withColumn("valid_to", F.lit(None).cast("timestamp"))
     with pytest.raises(AssertionError, match="more than one current version"):
-        namespace["check_cdc_versions"](two_current, "x")
+        namespace["check_scd2_versions"](two_current, "x")
 
 
 def test_select_change_partitions(spark, lake):
@@ -219,53 +219,22 @@ def test_select_change_partitions(spark, lake):
 # ---------- Gold: SCD2 dimension and change facts ----------
 
 
-def test_price_changes_do_not_make_dimension_versions(spark, after_day_one):
-    dim = gold(spark, after_day_one, "dim_vehicle")
-    a = dim.filter(F.col("vehicle_id") == IDS["a"]).collect()
-    assert len(a) == 1 and a[0].is_current and a[0].valid_from == ts(0)
-
-
-def test_attribute_change_makes_a_dimension_version(spark, after_day_one):
-    dim = gold(spark, after_day_one, "dim_vehicle")
-    b = dim.filter(F.col("vehicle_id") == IDS["b"]).orderBy("version_number").collect()
-    assert [(r.condition, r.version_number, r.is_current) for r in b] == [("Excellent", 1, False), ("Good", 2, True)]
-    assert b[0].valid_to == b[1].valid_from == ts(30)
-    assert b[0].vehicle_key == b[1].vehicle_key != b[0].vehicle_version_key
-    assert b[0].manufacturer == "Ford"
-
-
-def test_sold_vehicle_has_no_current_version(spark, after_day_one):
-    c = gold(spark, after_day_one, "dim_vehicle").filter(F.col("vehicle_id") == IDS["c"]).collect()
-    assert [(r.is_current, r.is_deleted, r.valid_to) for r in c] == [(False, True, ts(40))]
+def test_gold_dimension_holds_only_the_current_state(spark, after_day_one):
+    """Mentor's decision: the history stays in Silver, Gold has one row per vehicle that exists now."""
+    dim = gold(spark, after_day_one, "dim_vehicle").filter("vehicle_key <> -1").collect()
+    current = {r.vehicle_id[0]: r for r in dim}
+    assert sorted(current) == ["a", "b", "d"]          # c was sold
+    assert current["b"].condition == "Good"            # the latest attribute value
+    assert current["a"].manufacturer == "Ford"
+    assert len(dim) == len(current)                    # one row per vehicle, no versions
 
 
 def test_dimension_has_the_unknown_member(spark, after_day_one):
-    unknown = gold(spark, after_day_one, "dim_vehicle").filter("vehicle_version_key = -1").collect()
-    assert len(unknown) == 1 and unknown[0].vehicle_key == -1 and unknown[0].manufacturer == "Unknown"
+    unknown = gold(spark, after_day_one, "dim_vehicle").filter("vehicle_key = -1").collect()
+    assert len(unknown) == 1 and unknown[0].manufacturer == "Unknown"
 
 
-def test_events_with_prices_and_vehicle_versions(spark, after_day_one):
-    fact = gold(spark, after_day_one, "fact_listing_event")
-    dim = gold(spark, after_day_one, "dim_vehicle")
-    rows = (
-        fact.join(dim.select("vehicle_version_key", "vehicle_id", "version_number"), "vehicle_version_key")
-        .orderBy("event_ts", "vehicle_id").collect()
-    )
-    events = [(r.vehicle_id[0], r.event_type, r.price, r.price_change, r.version_number) for r in rows]
-    assert events == [
-        ("a", "Snapshot", Decimal("15000.00"), None, 1),
-        ("b", "Snapshot", Decimal("15000.00"), None, 1),
-        ("c", "Snapshot", Decimal("15000.00"), None, 1),
-        ("a", "Price Change", Decimal("14000.00"), Decimal("-1000.00"), 1),
-        ("a", "Price Change", Decimal("13000.00"), Decimal("-1000.00"), 1),
-        ("b", "Updated", Decimal("15000.00"), Decimal("0.00"), 2),   # the version valid from that moment
-        ("c", "Sold", Decimal("15000.00"), None, 1),                 # the version it closed
-        ("d", "Listed", Decimal("9000.00"), None, 1),
-    ]
-    assert {r.event_date_key for r in rows} == {20261124}
-
-
-def test_two_attribute_changes_at_the_same_commit_time_get_their_own_versions(spark, lake):
+def test_two_changes_at_the_same_commit_time_get_their_own_versions(spark, lake):
     """One transaction changed the vehicle twice: same commit time, different WAL positions -> different keys."""
     land(lake, SNAPSHOT, "snapshot")
     run_silver(spark, lake)
@@ -275,27 +244,18 @@ def test_two_attribute_changes_at_the_same_commit_time_get_their_own_versions(sp
     ])
     run_all(spark, lake)
 
-    dim = gold(spark, lake, "dim_vehicle").filter(F.col("vehicle_id") == IDS["a"]).orderBy("version_number").collect()
-    assert [(r.version_number, r.condition, r.title_status, r.is_current) for r in dim] == [
-        (1, "Excellent", "Clean", False), (2, "Good", "Clean", False), (3, "Good", "Rebuilt", True),
+    a = versions_of(spark, lake, "a")
+    assert [(r.condition, r.title_status, r.is_current) for r in sorted(a, key=lambda r: r.change_seq)] == [
+        ("excellent", "clean", False), ("good", "clean", False), ("good", "rebuilt", True),
     ]
-    assert dim[1].valid_from == dim[2].valid_from == ts(10)  # same time, still three different keys
-    assert len({r.vehicle_version_key for r in dim}) == 3
-
-    events = (
-        gold(spark, lake, "fact_listing_event").filter(F.col("vehicle_key") == dim[0].vehicle_key)
-        .orderBy("lsn_num").collect()
-    )
-    assert [(e.event_type, e.vehicle_version_key) for e in events] == [
-        ("Snapshot", dim[0].vehicle_version_key),
-        ("Updated", dim[1].vehicle_version_key),
-        ("Updated", dim[2].vehicle_version_key),
-    ]
+    assert len({r.version_key for r in a}) == 3
+    current = gold(spark, lake, "dim_vehicle").filter(F.col("vehicle_id") == IDS["a"]).collect()
+    assert [(r.condition, r.title_status) for r in current] == [("Good", "Rebuilt")]
 
 
-def test_cdc_gold_diagram_matches_the_code(spark, lake):
-    columns = local_pipeline.namespace(spark, **lake)["CDC_GOLD_COLUMNS"]
-    assert dbml_tables(CDC_DBML_PATH) == columns
+def test_gold_diagram_matches_the_code(spark, lake):
+    columns = local_pipeline.namespace(spark, **lake)["CURRENT_DIM_VEHICLE_COLUMNS"]
+    assert dbml_tables(GOLD_DBML_PATH) == {"dim_vehicle": columns}
 
 
 def test_source_table_columns_are_the_raw_listing_columns(spark, lake):

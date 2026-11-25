@@ -63,24 +63,31 @@ Vehicles with only regular maintenance score 100; vehicles without any service h
 Categories: Excellent ≥ 90, Good ≥ 75, Fair ≥ 50, Poor. The profiling behind every weight, worked examples and the
 verified distribution are in [`documentation/reliability_score.md`](documentation/reliability_score.md).
 
-## Change Data Capture demo
+## Incremental loads and SCD Type 2 history (local demos)
 
-A local demonstration of **log-based CDC** with **SCD Type 2 history** ([`documentation/cdc.md`](documentation/cdc.md)),
-next to the daily file pipeline:
+Two ways to load only what is new, depending on the source. Both fill the same Silver history: every version of a
+listing with `valid_from` / `valid_to` / `is_current`. They also share the same Gold dimension, which holds only
+the current state (`notebooks/utils/scd2_helpers.py`).
 
-- A PostgreSQL database in Docker plays the operational database of a listing platform, filled with 80 % of a sample
-  of the Fourth source.
-- A simulator makes daily changes: new listings from the other 20 %, price drops, condition changes, sold cars.
-- `cdc/cdc_reader.py` reads only the changes from the database's write-ahead log (replication slot + wal2json) into
-  Bronze.
-- Silver applies them with MERGE into one table with every version (`valid_from` / `valid_to` / `is_current`).
-- Gold rebuilds an SCD2 `dim_vehicle` and a `fact_listing_event` from that history.
+- **Incremental file load** ([`documentation/incremental_load.md`](documentation/incremental_load.md)):
+  - the Fourth file is split into five days, with new listings and changed versions of earlier ones;
+  - every run moves the next day from the original file into a growing source file, then into Bronze;
+  - watermarks are kept in a Delta control table;
+  - Silver applies only records it does not have yet.
 
-In the verified 3-day run, every day processed about 7 % of the rows a full load would read. The Silver current
-state always equalled the source database, and a reader crash before confirming changed nothing.
+  Verified on the full file: 5 days, the Silver current state always equal to the source, and a re-run or a
+  repeated Bronze load changed nothing.
+- **Log-based change data capture** ([`documentation/cdc.md`](documentation/cdc.md)):
+  - a PostgreSQL database in Docker plays a listing platform, and a simulator inserts, changes and deletes
+    listings;
+  - `cdc/cdc_reader.py` reads only the changes from the database's write-ahead log (replication slot + wal2json)
+    into Bronze.
+
+  Every day processed about 7 % of the rows a full load would read.
 
 ```bash
-.venv/bin/pip install -r cdc/requirements.txt
+.venv/bin/python -m incremental.run_demo                  # file load, 5 days
+.venv/bin/pip install -r cdc/requirements.txt             # CDC demo: PostgreSQL in Docker
 .venv/bin/python -m cdc.run_demo --days 3 --crash-test
 ```
 
@@ -89,15 +96,18 @@ state always equalled the source database, and a reader crash before confirming 
 ```
 adf/                    ADF pipelines, linked services, datasets and trigger (JSON exported from ADF Studio)
 cdc/                    CDC demo: PostgreSQL source (Docker), change simulator, WAL reader, local runner
+incremental/            incremental file load demo: original file in five days, local runner and checks
 documentation/          silver_data_model.md, gold_data_model.md, gold_star_schema.dbml,
-                        reliability_score.md, orchestration.md, data_quality.md, cdc.md, cdc_gold_schema.dbml
+                        reliability_score.md, orchestration.md, data_quality.md, cdc.md, incremental_load.md,
+                        scd2_gold_schema.dbml
 notebooks/              Databricks notebooks (source format), numbered in execution order
   00_config.py          storage access through the Key Vault-backed secret scope, paths, sources, logger
   01_…                  landing vs Bronze validation
   02_… – 06_…           Silver: one stage per vehicle source, brand lookup, union, service events,
                         exchange rates (incremental MERGE), priced view, data quality checks (gate before Gold)
   07_… – 09_…           Gold: dimensions, facts, Unity Catalog views, Reliability Score
-  10_… – 11_…           CDC demo: Silver version history (SCD2) and Gold SCD2 dimension + change facts
+  10_… – 11_…           CDC demo: Silver version history (SCD2) and the current-state Gold dimension
+  12_… – 15_…           incremental file load: original → source → Bronze (watermarks), Silver SCD2, Gold current
   utils/                shared helpers (cleaning, data quality, Delta writes, Gold keys and weights)
   profiling/            read-only profiling notebooks behind the cleaning rules and the score
 orchestration/          Databricks Job definitions (YAML, "View as code" format)

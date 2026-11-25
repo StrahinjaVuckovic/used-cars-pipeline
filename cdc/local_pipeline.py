@@ -17,7 +17,9 @@ from notebook_utils import load_config_and_utils, run_notebook  # noqa: E402
 UTILS = [
     "utils/vehicle_listings_cleaning.py",
     "utils/gold_helpers.py",
+    "utils/scd2_helpers.py",
     "utils/cdc_helpers.py",
+    "utils/incremental_helpers.py",
 ]
 
 
@@ -37,6 +39,10 @@ def spark_session():
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.ansi.enabled", "true")  # as on Databricks Runtime 18
         .config("spark.driver.memory", "3g")
+        .config("spark.databricks.delta.snapshotPartitions", "4")
+        # Local only: pyspark 4.1.4 cannot read the checkpoint files delta-spark 4.1.0 writes after 10 commits
+        # (NoSuchMethodError in ParquetToSparkSchemaConverter); Databricks is not affected.
+        .config("spark.databricks.delta.properties.defaults.checkpointInterval", "1000")
     )
     session = configure_spark_with_delta_pip(builder).getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
@@ -44,10 +50,12 @@ def spark_session():
 
 
 def namespace(spark, widgets: dict = None, bronze=settings.BRONZE_DIR, silver=settings.SILVER_DIR,
-              gold=settings.GOLD_DIR) -> dict:
+              gold=settings.GOLD_DIR, landing=None) -> dict:
     """A notebook namespace with 00_config and all utils loaded and the paths pointing to local folders."""
     ns = load_config_and_utils(spark, str(bronze), str(silver), {"dev_mode": "false", **(widgets or {})})
     ns["GOLD_PATH"] = str(gold)
+    if landing is not None:
+        ns["LANDING_PATH"] = str(landing)
     for utils in UTILS:
         run_notebook(utils, ns)
     return ns

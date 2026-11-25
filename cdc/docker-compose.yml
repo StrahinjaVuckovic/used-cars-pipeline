@@ -20,7 +20,7 @@ services:
       - -c
       - output_plugin_libraries=wal2json   # allow wal2json as a logical decoding output plugin
     ports:
-      - "127.0.0.1:55432:5432"     # localhost only; 5432 is often taken by a local PostgreSQL
+      - "55432:5432"     # reachable from Windows tools (DBeaver, via the WSL address); 5432 is often taken
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d listings_source"]
       interval: 2s

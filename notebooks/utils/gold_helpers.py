@@ -99,20 +99,10 @@ GOLD_COLUMNS = {
     ],
 }
 
-# Gold tables of the CDC demo (documentation/cdc.md, documentation/cdc_gold_schema.dbml), stored under gold/cdc/
-# so the demo never touches the main star schema. dim_vehicle is the same dimension as above (without
-# has_service_history: the demo has no service book) plus the SCD Type 2 columns.
-CDC_GOLD_COLUMNS = {
-    "dim_vehicle": [
-        "vehicle_version_key",
-        *[c for c in GOLD_COLUMNS["dim_vehicle"] if c != "has_service_history"],
-        "valid_from", "valid_to", "is_current", "is_deleted", "version_number",
-    ],
-    "fact_listing_event": [
-        "event_key", "vehicle_key", "vehicle_version_key", "event_date_key", "event_ts", "event_type",
-        "lsn_num", "price", "previous_price", "price_change", "currency", "odometer",
-    ],
-}
+# dim_vehicle of the CDC demo and the incremental file load (documentation/cdc.md, incremental_load.md and
+# scd2_gold_schema.dbml): only the current state, the same columns as the main dim_vehicle without
+# has_service_history (those demos have no service book). Stored under gold/cdc/ and gold/incremental/.
+CURRENT_DIM_VEHICLE_COLUMNS = [c for c in GOLD_COLUMNS["dim_vehicle"] if c != "has_service_history"]
 
 # Reliability Score (documentation/reliability_score.md): 100 minus explainable penalties, clamped to 0-100.
 RELIABILITY_WEIGHTS = {

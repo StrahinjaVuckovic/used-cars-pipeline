@@ -33,6 +33,12 @@ RAW_LISTING_COLUMNS = [
 ]
 
 # Common raw types, so CSV (all strings) and typed formats (Parquet/Avro/JSON) look the same before cleaning.
+# Types of the raw columns in JSON sources (the CDC change events, the incremental source file); the rest are strings.
+RAW_LISTING_JSON_TYPES = {
+    "price": "DOUBLE", "year": "DOUBLE", "odometer": "DOUBLE", "lat": "DOUBLE", "long": "DOUBLE",
+    "source_system_id": "BIGINT",
+}
+
 RAW_LISTING_TYPES = {
     "price": "double",
     "year": "double",

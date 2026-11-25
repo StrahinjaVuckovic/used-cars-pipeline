@@ -39,6 +39,15 @@ def next_attribute(row: dict) -> dict:
     return {"title_status": "clean" if (row.get("title_status") or "").lower() == "rebuilt" else "rebuilt"}
 
 
+def drop_price(price, odometer, rng: random.Random) -> tuple:
+    """A seller lowers the price by 3-15 % and the car has driven a bit more (also used by the incremental demo)."""
+    if price is not None:
+        price = float(round(price * (1 - rng.uniform(0.03, 0.15))))
+    if odometer is not None:
+        odometer = float(odometer + rng.randint(50, 1500))
+    return price, odometer
+
+
 def plan_changes(current: dict, reserve: list, day: int, seed: int = settings.SEED, rates: dict = RATES) -> list:
     """
     The changes of one day as a list of operations, in the order they happen:
@@ -65,10 +74,7 @@ def plan_changes(current: dict, reserve: list, day: int, seed: int = settings.SE
         price, odometer = current[vehicle_id].get("price"), current[vehicle_id].get("odometer")
         group = []
         for _ in range(2 if rng.random() < rates["second_price_drop"] else 1):
-            if price is not None:
-                price = float(round(price * (1 - rng.uniform(0.03, 0.15))))
-            if odometer is not None:
-                odometer = float(odometer + rng.randint(50, 1500))
+            price, odometer = drop_price(price, odometer, rng)
             group.append({"op": "update", "id": vehicle_id, "set": {"price": price, "odometer": odometer}})
         groups.append(group)
     groups += [[{"op": "update", "id": v, "set": next_attribute(current[v])}] for v in attribute_changed]

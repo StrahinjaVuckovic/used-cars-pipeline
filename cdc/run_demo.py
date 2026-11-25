@@ -80,10 +80,10 @@ def main(days: int, crash_test: bool, spark=None) -> list:
             "seconds": round(time.time() - started, 1), **({"crash_test": crash} if crash else {}),
         })
 
-    print("\nDay | changes read | listings in source | Silver versions | Gold versions | events")
+    print("\nDay | changes read | listings in source | Silver versions | Gold current vehicles | sold")
     for row in report:
         print(f"{row['day']:>3} | {row['changes']:>12} | {row['source_listings']:>18} | {row['silver_versions']:>15} "
-              f"| {row['gold_vehicle_versions']:>13} | {row['gold_events']}")
+              f"| {row['gold_current_vehicles']:>21} | {row['sold_listings']}")
     for row in report[1:]:
         share = 100 * row["changes"] / row["source_listings"]
         print(f"Day {row['day']}: {row['changes']} changes processed instead of {row['source_listings']} rows "

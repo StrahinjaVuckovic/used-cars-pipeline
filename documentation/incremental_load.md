@@ -118,6 +118,17 @@ Both fill the same Silver SCD2 table model and the same current-only Gold dimens
 .venv/bin/python -m incremental.run_demo           # 5 days on the full Fourth file; writes to incremental_data/
 ```
 
+For a presentation, `.venv/bin/python -m incremental.presentation` (about 6 minutes) runs the same steps and
+prints a formatted report:
+- the original file per day;
+- for every day: the watermarks before and after, the records moved by each step and the checks;
+- the re-run and the crash test;
+- a summary table;
+- one real listing with its records in the source, its Silver history and its Gold row;
+- the watermark table.
+
+The technical output goes to `incremental_data/presentation.log`.
+
 The runner:
 1. resets `incremental_data/`;
 2. builds the original file and the brand lookup;

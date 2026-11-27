@@ -153,6 +153,15 @@ schema.
 .venv/bin/python -m cdc.run_demo --days 3 --crash-test     # starts Docker if needed; writes to cdc_data/
 ```
 
+For a presentation, `.venv/bin/python -m cdc.presentation` runs the same steps and prints a formatted report:
+- every step and day;
+- the checks and the crash test;
+- a summary table;
+- three real listings (price drop, sold, new) with their Silver history, Gold row and the SQL to look them up in
+  the database.
+
+The technical output goes to `cdc_data/presentation.log`.
+
 The single steps also run on their own:
 - `python -m cdc.load_initial`
 - `python -m cdc.cdc_reader --snapshot`
